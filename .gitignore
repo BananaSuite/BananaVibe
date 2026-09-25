@@ -1,0 +1,35 @@
+venv/
+__pycache__/
+*.pyc
+data/
+*.log
+*.agekey
+*.age
+.env
+bin/opencode-*
+.venv/
+.pytest_cache/
+.env.*
+!.env.example
+backups/
+node_modules/
+.cache/
+.ruff_cache/
+**/.secret_key
+*.db
+*.sqlite3
+
+# Keys, certificates and archives must never be committed. These are not files
+# the project ships; the patterns exist so that a key generated while testing
+# in a working copy cannot be swept up by `git add .`.
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+*.tar.gz
+*.tgz
+node_modules/

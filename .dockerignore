@@ -1,0 +1,8 @@
+*
+!Dockerfile.sandbox
+!sandbox/
+!sandbox/**
+!LICENSE
+!NOTICE
+**/__pycache__
+**/*.pyc

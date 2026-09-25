@@ -1,0 +1,27 @@
+forge = "github"
+server_url = "https://github.com"
+control_repository = "BananaSuite/BananaWiki"
+target_repository = "BananaSuite/BananaWiki"
+base_branch = "main"
+state_branch = "bananavibe-state"
+default_model = "coding"
+open_issues = true
+prepare = [
+  ["python3", "-m", "venv", "/state/venv"],
+  ["/state/venv/bin/pip", "install", "-r", "requirements.txt", "pytest", "pytest-xdist"],
+]
+checks = [["/state/venv/bin/python", "-m", "pytest", "-q", "-n", "2"]]
+
+[models.coding]
+provider = "openai-compatible"
+endpoint = "https://api.openai.com/v1"
+# Set the model ID to a coding-capable model enabled on your provider account.
+model = "YOUR_MODEL_ID"
+api_key_env = "OPENAI_API_KEY"
+
+[limits]
+max_minutes = 45
+max_iterations = 12
+max_calls = 1000
+memory_mb = 4096
+cpus = 2

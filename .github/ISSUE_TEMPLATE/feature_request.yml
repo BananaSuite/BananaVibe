@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a change to BananaVibe.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the maintenance work this would take off someone.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would it do?
+      description: |
+        Say how it behaves, and where the maintainer still reviews the result.
+        Proposals that remove the draft pull request step will be declined.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

@@ -1,0 +1,17 @@
+forge = "github"
+server_url = "https://github.com"
+control_repository = "BananaSuite/BananaChat-prompts"
+target_repository = "BananaSuite/BananaChat"
+base_branch = "main"
+default_model = "coding"
+prepare = [
+  ["python3", "-m", "venv", "/state/venv"],
+  ["/state/venv/bin/pip", "install", "-r", "requirements.txt", "pytest"],
+]
+checks = [["/state/venv/bin/python", "-m", "pytest", "-q"]]
+
+[models.coding]
+provider = "anthropic"
+endpoint = "https://api.anthropic.com/v1"
+model = "YOUR_MODEL_ID"
+api_key_env = "ANTHROPIC_API_KEY"

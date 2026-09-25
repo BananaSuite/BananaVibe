@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a reproducible bug in BananaVibe.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Redact tokens, private issue content and OpenCode share links before
+        pasting anything here. For **security vulnerabilities**, follow
+        [SECURITY.md](https://github.com/BananaSuite/BananaVibe/blob/main/SECURITY.md)
+        instead of opening an issue.
+
+  - type: dropdown
+    id: forge
+    attributes:
+      label: Forge
+      options:
+        - GitHub
+        - Forgejo
+        - Other (please describe)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Action revision
+      description: The commit the workflow pins the action to.
+      placeholder: "Commit hash"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What the task did, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The relevant part of `.bananavibe.toml`, with secrets removed.
+      render: toml
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Runner output
+      description: |
+        The step that failed, from the Actions log. **Remove tokens, model
+        keys and private task content before pasting.**
+      render: shell
+    validations:
+      required: false

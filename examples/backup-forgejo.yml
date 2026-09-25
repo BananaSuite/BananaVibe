@@ -1,0 +1,41 @@
+name: Optional encrypted Agent backup
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: bananavibe-backup
+  cancel-in-progress: false
+jobs:
+  backup:
+    runs-on: bananavibe
+    timeout-minutes: 60
+    steps:
+      - uses: https://github.com/actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      # The dedicated host runner needs Python 3.11+, venv, Git, and age.
+      - name: Fetch reviewed BananaVibe tooling
+        env:
+          AGENT_REVISION: ${{ vars.BANANAVIBE_REVISION }}
+        run: |
+          set -euo pipefail
+          [[ "$AGENT_REVISION" =~ ^[a-f0-9]{40}$ ]] || { echo 'Set BANANAVIBE_REVISION to the reviewed published commit.'; exit 1; }
+          git init .bananavibe-backup-tool
+          git -C .bananavibe-backup-tool -c core.hooksPath=/dev/null fetch --depth=1 https://github.com/BananaSuite/BananaVibe.git "$AGENT_REVISION"
+          git -C .bananavibe-backup-tool -c core.hooksPath=/dev/null checkout --detach FETCH_HEAD
+          python3 -m venv .bananavibe-backup-tool/.venv
+          .bananavibe-backup-tool/.venv/bin/python -m pip install -r .bananavibe-backup-tool/requirements.txt
+      - name: Back up Agent data
+        env:
+          BANANAVIBE_TOKEN: ${{ secrets.BANANAVIBE_BACKUP_READ_TOKEN }}
+          BACKUP_REPO_TOKEN: ${{ secrets.BACKUP_REPO_TOKEN }}
+          BACKUP_RECOVERY_KEY: ${{ secrets.BACKUP_RECOVERY_KEY }}
+          BACKUP_REPO: ${{ vars.BACKUP_REPO }}
+          BACKUP_FORGE: ${{ vars.BACKUP_FORGE }}
+          BACKUP_NAME: ${{ vars.BACKUP_NAME }}
+          BACKUP_USERNAME: ${{ vars.BACKUP_USERNAME }}
+        run: .bananavibe-backup-tool/.venv/bin/python .bananavibe-backup-tool/scripts/backup_action.py --config .bananavibe.toml

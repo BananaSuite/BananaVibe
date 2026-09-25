@@ -1,0 +1,12 @@
+FROM node:24-trixie-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-requests python3-venv git age curl ca-certificates build-essential ripgrep unzip \
+    && rm -rf /var/lib/apt/lists/*
+COPY sandbox/ /opt/bananavibe/
+COPY LICENSE NOTICE /opt/bananavibe/
+RUN python3 /opt/bananavibe/fetch_opencode.py /usr/local/bin/opencode
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER 1000:1000
+WORKDIR /workspace
+ENTRYPOINT ["opencode"]

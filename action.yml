@@ -1,0 +1,31 @@
+name: BananaVibe
+description: Help BananaWiki and BananaChat maintainers prepare quick fixes and routine maintenance for human review.
+branding:
+  icon: git-pull-request
+  color: yellow
+inputs:
+  config:
+    description: Trusted configuration checked out from the issue repository's default branch.
+    default: .bananavibe.toml
+    required: false
+runs:
+  using: composite
+  steps:
+    - name: Run BananaVibe controller
+      shell: bash
+      env:
+        BANANAVIBE_ACTION_ROOT: ${{ github.action_path }}
+        BANANAVIBE_CONFIG_FILE: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "Python 3.11 or newer is required on this runner")'
+        task_venv=$(mktemp -d "${RUNNER_TEMP:-/tmp}/bananavibe-python.XXXXXXXX")
+        trap 'rm -rf -- "$task_venv"' EXIT
+        python3 -m venv "$task_venv"
+        "$task_venv/bin/python" -m pip install --quiet --only-binary=:all: --no-deps --upgrade 'pip>=26.2.1'
+        "$task_venv/bin/python" -m pip install --quiet -r "$BANANAVIBE_ACTION_ROOT/requirements.txt"
+        # PYTHONSAFEPATH keeps the checked-out repository off sys.path. Without
+        # it a bananavibe/ directory or a requests.py committed to the control
+        # repository would load instead of this action, inside a process that
+        # holds the forge token and every model key.
+        PYTHONSAFEPATH=1 PYTHONPATH="$BANANAVIBE_ACTION_ROOT" "$task_venv/bin/python" -m bananavibe --config "$BANANAVIBE_CONFIG_FILE"

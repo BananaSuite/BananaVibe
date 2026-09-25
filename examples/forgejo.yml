@@ -1,0 +1,41 @@
+name: BananaVibe maintenance
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number
+        required: true
+      command:
+        description: BananaVibe command
+        default: /banana status
+        required: true
+jobs:
+  maintenance:
+    if: >-
+      github.event_name != 'issue_comment' ||
+      startsWith(github.event.comment.body, '/banana ') ||
+      startsWith(github.event.comment.body, '/bananavibe ') ||
+      github.event.comment.body == '/banana' ||
+      github.event.comment.body == '/bananavibe'
+    # A dedicated Linux host runner with Python 3.11+, Git, and Docker.
+    runs-on: bananavibe
+    timeout-minutes: 60
+    steps:
+      - uses: https://github.com/actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      # Pin the published BananaVibe commit before enabling the workflow, or
+      # point this at a pinned mirror on your Forgejo instance if GitHub
+      # access is unavailable.
+      - uses: https://github.com/BananaSuite/BananaVibe@main
+        env:
+          BANANAVIBE_TOKEN: ${{ secrets.BANANAVIBE_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

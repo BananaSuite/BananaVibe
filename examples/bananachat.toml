@@ -1,7 +1,7 @@
+# .bananavibe.toml for BananaChat, with prompts kept in a private repository.
 forge = "github"
-server_url = "https://github.com"
-control_repository = "BananaSuite/BananaChat-prompts"
-target_repository = "BananaSuite/BananaChat"
+control_repository = "BananaSuite/BananaChat-prompts"   # private: issues, guidance and state
+target_repository = "BananaSuite/BananaChat"            # public: branches and draft PRs
 base_branch = "main"
 default_model = "coding"
 prepare = [
@@ -15,3 +15,6 @@ provider = "anthropic"
 endpoint = "https://api.anthropic.com/v1"
 model = "YOUR_MODEL_ID"
 api_key_env = "ANTHROPIC_API_KEY"
+
+[network]
+allow = ["pypi.org", "files.pythonhosted.org"]

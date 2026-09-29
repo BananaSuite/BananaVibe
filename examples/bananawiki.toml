@@ -1,27 +1,33 @@
+# .bananavibe.toml for BananaWiki. Every key is described in docs/configuration.md.
 forge = "github"
 server_url = "https://github.com"
-control_repository = "BananaSuite/BananaWiki"
-target_repository = "BananaSuite/BananaWiki"
+control_repository = "BananaSuite/BananaWiki"   # where issues and task state live
+target_repository = "BananaSuite/BananaWiki"    # where branches and draft PRs go
 base_branch = "main"
-state_branch = "bananavibe-state"
 default_model = "coding"
-open_issues = true
+open_issues = true   # a maintainer opening an issue starts a task
+
+# Run in a fresh container before work starts, and again on a clean checkout
+# before every acceptance run. /state is private scratch space for the task.
 prepare = [
   ["python3", "-m", "venv", "/state/venv"],
   ["/state/venv/bin/pip", "install", "-r", "requirements.txt", "pytest", "pytest-xdist"],
 ]
+# All must pass on a clean checkout of the committed files before a PR opens.
 checks = [["/state/venv/bin/python", "-m", "pytest", "-q", "-n", "2"]]
 
 [models.coding]
 provider = "openai-compatible"
 endpoint = "https://api.openai.com/v1"
-# Set the model ID to a coding-capable model enabled on your provider account.
-model = "YOUR_MODEL_ID"
-api_key_env = "OPENAI_API_KEY"
+model = "YOUR_MODEL_ID"            # a coding-capable model enabled on your account
+api_key_env = "OPENAI_API_KEY"     # the Actions secret holding the key
+
+[network]
+# Hosts the sandbox may reach (through the gateway). "*" means any public host.
+allow = ["pypi.org", "files.pythonhosted.org", "github.com", "*.githubusercontent.com"]
 
 [limits]
-max_minutes = 45
+max_minutes = 45       # per run; /banana resume continues
 max_iterations = 12
-max_calls = 1000
 memory_mb = 4096
 cpus = 2

@@ -1,19 +1,48 @@
-# Security boundaries
+# Security model
 
-The trusted controller reads configuration only from the issue repository's checked-out default branch. It accepts commands only from maintainers with write access to both the issue and target repositories. Forge credentials remain in the controller's environment and its Git child processes. Git metadata, credential helpers, and the Docker socket are outside the coding workspace. The model cannot merge a PR or issue forge API requests with the bot token.
+BananaVibe runs code written by a language model on your runner and pushes it
+to your repository. These are the boundaries it relies on, and the ones it
+cannot provide.
 
-OpenCode runs as an unprivileged user in a disposable Docker container with a read-only root filesystem, dropped capabilities, no privilege escalation, resource limits, and only the project and temporary state mounted. A private network and an authenticated gateway separate the task from the host and internet. The gateway supplies a scoped, expiring model capability; the real provider key is mounted only in the gateway. Its separate control secret protects the engine's control API. Project OpenCode configuration and share links are disabled.
+## Who can make it act
 
-The task's network proxy rejects private, loopback, link-local, and metadata destinations. Provider endpoints are trusted operator configuration. Dependencies and source code are untrusted workload inputs; they execute inside this same task boundary. Containers share a kernel with the runner, so use a dedicated disposable VM and keep Docker and the host patched. A Docker limit on individual files is not a total filesystem quota.
+- Configuration comes only from the control repository's default branch, as checked out by the workflow. The workflow's own repository overrides any `control_repository` in the file.
+- Commands must be a whole comment, from someone with **write access to both** repositories. Bots, pull-request comments and edited comments are ignored. Unauthorized commands get no reply, so the bot can't be used to spam.
+- The agent's instructions are the issue title and body **as approved** by a maintainer, plus guidance given with `/banana answer`. Other comments never reach it. If the issue text changes after approval, the task stops until a maintainer resumes it.
 
-The controller rejects changes to workflow/configuration paths by default, unsafe workspace entries, excessive checkpoint size, and Git metadata writes. Do not remove protected paths to make a task easier; review privileged changes directly. It checkpoints with constant commit messages and independently executes the configured acceptance checks. Human branch-protection and CI policies remain necessary.
+## What the sandbox can reach
 
-Task result and public-summary files are read through directory descriptors without following links, with regular-file and size limits. Clearing a previous result also stays within the task directory; a linked report directory cannot redirect these operations into controller files.
+```text
+runner (controller)      holds BANANAVIBE_TOKEN, model keys, Git metadata
+  └─ per-task bridge ─── gateway container   real model key, control secret
+       └─ internal net ─ agent container      workspace + /state, task token only
+                       └ checker container    clean export + fresh /state
+```
 
-For private prompts, keep the issue repository, its Actions history, and its state branch private. Status comments and requests for help are posted there. Only code changes enter the target branch. The public PR summary is generated in a separate workspace/session that receives the already-pushed diff without the issue conversation. Provider requests still contain the task and source needed to implement it; choose a provider whose data handling meets your requirements.
+- The agent and checker containers are on an internal Docker network with no route out and no route to the host. Their only peer is the gateway.
+- The gateway (`sandbox/gateway.py`) accepts the task token for inference with the configured model only, up to `max_calls`, until the run's deadline. It relays provider responses, with the real key redacted from errors.
+- Its egress proxy allows public hosts in `network.allow` on ports 443 (CONNECT) and 80. It resolves DNS once and refuses private, loopback, link-local, carrier-grade NAT and metadata addresses.
+- The controller reaches OpenCode's API only through the gateway's control port, bound to `127.0.0.1` and protected by a separate secret.
+- The containers run as an unprivileged user with a read-only root filesystem, all capabilities dropped, `no-new-privileges`, and memory, CPU, process, file-size and open-file limits.
+- Git metadata, the askpass helper and the forge token are outside the mounted directory. Git runs with hooks, fsmonitor, external diff and global configuration disabled.
 
-Generated source can accidentally repeat information from a prompt. Review task branches and proposed changes for disclosure. Do not include secrets in a prompt. Private Git access for the target and private prompt storage are separate settings; one does not imply the other.
+## What is checked before publishing
 
-Task state uses content-version checks and expiring leases. External changes to the branch block final publication. Abrupt runner failure leaves a last-known checkpoint and an interrupted state, not a successful completion. Branches and PRs are never automatically merged or deleted.
+- Changes to `forbidden_paths` (workflows, local actions, `.bananavibe.toml` by default), embedded Git repositories and files over 50 MiB are reverted, never committed.
+- Checks run on a clean export of the committed tree in a fresh container with a fresh `/state`. Nothing the agent changed in its own environment can influence them.
+- Each push uses a lease on the last known checkpoint, so BananaVibe never overwrites commits it did not make. It re-checks the branch before opening the PR.
+- The PR description is generated from the diff alone, in a request with no tools. Mentions and closing keywords (`Fixes #12`) are neutralized so opening or merging the PR cannot ping people or close unrelated issues.
 
-See [installation](deployment.md) for token scopes, runner setup, resource budgets, and removal. Report problems using [SECURITY.md](../SECURITY.md).
+## What it does not protect against
+
+Task branches are ordinary branches of the target repository, so its `pull_request` workflows run the agent's code (tests, build scripts) with whatever secrets same-repository branches receive. Protected paths stop edits to workflow files, not to the code those workflows run. Keep deployment secrets in environments that require a reviewer.
+
+The agent can also weaken or delete a test in plain sight in its diff, and it sees the private issue and guidance. It is told not to copy them into files, but review test changes and look for disclosure as carefully as you review the code. Don't put secrets in issues.
+
+Prompts and source code go to the model provider you configure, so choose one whose data handling fits your project.
+
+Containers share the runner's kernel. Use GitHub-hosted runners or a dedicated, disposable, patched VM, never a runner that holds other secrets.
+
+Finally, anyone who can push to the control repository can edit task records. BananaVibe validates what it reads (for example, it only ever works on `bananavibe/*` branches), but treat write access to that repository as maintainer access.
+
+Report vulnerabilities as described in [SECURITY.md](../SECURITY.md).

@@ -1,8 +1,7 @@
 *
 !Dockerfile.sandbox
-!sandbox/
-!sandbox/**
+!sandbox/gateway.py
+!sandbox/fetch_opencode.py
+!sandbox/OPENCODE-LICENSE
 !LICENSE
 !NOTICE
-**/__pycache__
-**/*.pyc

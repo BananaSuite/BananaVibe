@@ -1,31 +1,39 @@
 name: BananaVibe
-description: Help BananaWiki and BananaChat maintainers prepare quick fixes and routine maintenance for human review.
+description: Maintainers ask in an issue; a sandboxed coding agent prepares a checked branch and a draft pull request for review.
+author: Luca Zani and contributors
 branding:
   icon: git-pull-request
   color: yellow
 inputs:
   config:
-    description: Trusted configuration checked out from the issue repository's default branch.
+    description: Path to the trusted configuration, checked out from the issue repository's default branch.
     default: .bananavibe.toml
     required: false
+outputs:
+  outcome:
+    description: What happened, such as complete, blocked, paused, stopped, failed, busy or ignored.
+    value: ${{ steps.run.outputs.outcome }}
+  issue:
+    description: The issue number that was worked on, if any.
+    value: ${{ steps.run.outputs.issue }}
 runs:
   using: composite
   steps:
-    - name: Run BananaVibe controller
+    - name: Run BananaVibe
+      id: run
       shell: bash
       env:
         BANANAVIBE_ACTION_ROOT: ${{ github.action_path }}
-        BANANAVIBE_CONFIG_FILE: ${{ inputs.config }}
+        BANANAVIBE_CONFIG: ${{ inputs.config }}
       run: |
         set -euo pipefail
-        python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "Python 3.11 or newer is required on this runner")'
-        task_venv=$(mktemp -d "${RUNNER_TEMP:-/tmp}/bananavibe-python.XXXXXXXX")
-        trap 'rm -rf -- "$task_venv"' EXIT
-        python3 -m venv "$task_venv"
-        "$task_venv/bin/python" -m pip install --quiet --only-binary=:all: --no-deps --upgrade 'pip>=26.2.1'
-        "$task_venv/bin/python" -m pip install --quiet -r "$BANANAVIBE_ACTION_ROOT/requirements.txt"
-        # PYTHONSAFEPATH keeps the checked-out repository off sys.path. Without
-        # it a bananavibe/ directory or a requests.py committed to the control
-        # repository would load instead of this action, inside a process that
-        # holds the forge token and every model key.
-        PYTHONSAFEPATH=1 PYTHONPATH="$BANANAVIBE_ACTION_ROOT" "$task_venv/bin/python" -m bananavibe --config "$BANANAVIBE_CONFIG_FILE"
+        python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "BananaVibe needs Python 3.11 or newer on the runner.")'
+        command -v docker >/dev/null || { echo '::error::BananaVibe needs Docker on the runner.'; exit 1; }
+        # No virtual environment and no downloads: BananaVibe uses only the
+        # standard library. -P (safe path) keeps the checked-out repository
+        # off sys.path, so files committed there cannot shadow BananaVibe's
+        # modules inside a process that holds the forge token and model keys.
+        # exec lets cancellation signals reach BananaVibe directly, so it can
+        # save a final checkpoint.
+        export PYTHONPATH="$BANANAVIBE_ACTION_ROOT"
+        exec python3 -P -m bananavibe run --config "$BANANAVIBE_CONFIG"

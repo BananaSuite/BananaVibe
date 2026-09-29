@@ -1,26 +1,31 @@
-"""Only an anchored command is executable; ordinary issue text stays task input."""
+"""Issue commands. Only a comment that is entirely a command is executable;
+command-like text inside ordinary discussion is never acted on."""
 
 from dataclasses import dataclass
 import re
 
+NAMES = ("help", "start", "status", "stop", "resume", "restart", "models", "model", "answer", "fail")
+NEEDS_ARGUMENT = {"model", "answer", "fail"}
+ALIASES = {"revise": "answer", "cancel": "stop", "continue": "resume"}
+PATTERN = re.compile(r"\s*/banana(?:vibe)?(?:[ \t]+([a-z]+))?(?:(?:[ \t]*\r?\n|[ \t]+)([\s\S]*))?", re.IGNORECASE)
 
-HELP = """BananaVibe prepares maintenance drafts for human review.
+HELP = """**BananaVibe** prepares checked drafts for maintainer review. Commands must be the whole comment.
 
 | Command | Effect |
 | --- | --- |
+| `/banana start` | Begin work on this issue. |
+| `/banana status` | Show the task state, branch, checkpoint and pull request. |
+| `/banana stop` | Stop at the next safe point, keeping the saved branch. |
+| `/banana resume` | Continue from the saved branch, or approve an edited issue. |
+| `/banana answer TEXT` | Give guidance and continue. On a finished task, revise its open pull request. |
+| `/banana restart` | Start over from the base branch on a new branch (the old one is kept). |
+| `/banana models` | List the configured model aliases. |
+| `/banana model ALIAS` | Switch model; a running task switches at its next safe point. |
+| `/banana fail REASON` | Mark the task failed and stop. |
 | `/banana help` | Show this list. |
-| `/banana start` | Accept this issue and begin a task. |
-| `/banana status` | Show its state, checkpoint, and recovery instructions. |
-| `/banana stop` | Stop work and save a checkpoint; keep the issue open. |
-| `/banana resume` | Continue from the last saved branch. |
-| `/banana restart` | Start again from the configured base on a new branch. |
-| `/banana models` | List configured model aliases. |
-| `/banana model ALIAS` | Change model; a live task continues with that model. |
-| `/banana answer TEXT` | Supply requested guidance and resume work. |
-| `/banana fail REASON` | Mark the task failed and stop work. |
 
-Only maintainers of both the issue repository and target repository can control tasks.
-Passing configured checks produces a draft PR for review; BananaVibe never merges it.
+Only people with write access to both the issue repository and the target repository can use commands.
+BananaVibe opens draft pull requests after the configured checks pass; it never merges them.
 """
 
 
@@ -31,15 +36,13 @@ class Command:
 
 
 def parse(body):
-    match = re.fullmatch(r"\s*/(?:banana|bananavibe)(?:\s+([a-z]+))?(?:[ \t]+([\s\S]*))?\s*", body or "")
+    """Return the Command a comment asks for, or None if it is not a command."""
+    match = PATTERN.fullmatch(body or "")
     if not match:
         return None
-    name = match.group(1) or "help"
+    name = (match.group(1) or "help").lower()
+    name = ALIASES.get(name, name)
     argument = (match.group(2) or "").strip()
-    if name not in {"help", "start", "status", "stop", "resume", "restart", "models", "model", "answer", "fail"}:
-        return Command("help")
-    if name in {"model", "answer", "fail"} and not argument:
-        return Command("help")
-    if name not in {"model", "answer", "fail"} and argument:
+    if name not in NAMES or (name in NEEDS_ARGUMENT) != bool(argument):
         return Command("help")
     return Command(name, argument[:32000])

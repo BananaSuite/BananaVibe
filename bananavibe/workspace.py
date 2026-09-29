@@ -1,17 +1,26 @@
-"""Git metadata and credentials stay outside the directory mounted into OpenCode."""
+"""The task's working tree. Git metadata and credentials stay outside the
+directory that is mounted into the sandbox."""
 
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
-import subprocess
-import sys
+
+from .gitutil import Git, GitError
+
+REPORT_DIR = ".bananavibe-task"
+SANDBOX_UID = 65532
 
 
-def read_task_json(project, name, limit):
-    """Read a bounded regular report without traversing task-controlled links."""
+class BranchMoved(RuntimeError):
+    pass
+
+
+def read_report(project, name, limit):
+    """Read a bounded JSON object from the report directory without following links."""
     try:
-        directory = os.open(Path(project) / ".bananavibe-task", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory = os.open(Path(project) / REPORT_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         finally:
@@ -21,126 +30,167 @@ def read_task_json(project, name, limit):
             if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                 return None
             raw = source.read(limit + 1)
-        if len(raw) > limit:
-            return None
-        data = json.loads(raw)
+        data = json.loads(raw) if len(raw) <= limit else None
         return data if isinstance(data, dict) else None
     except (OSError, ValueError, UnicodeError):
         return None
 
 
-def clear_task_report(project):
+def clear_report(project, name="result.json"):
+    """Remove a previous report; a linked report directory is left alone."""
     try:
-        directory = os.open(Path(project) / ".bananavibe-task", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.unlink("result.json", dir_fd=directory)
-        finally:
-            os.close(directory)
+        directory = os.open(Path(project) / REPORT_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise OSError("The task report directory is not a plain directory.") from None
+    try:
+        os.unlink(name, dir_fd=directory)
     except FileNotFoundError:
         pass
+    finally:
+        os.close(directory)
+
+
+def give_to_sandbox(root):
+    """When the runner is root, hand the tree to the unprivileged sandbox user."""
+    if os.geteuid() != 0:
+        return
+    for directory, directories, files in os.walk(root):
+        for name in (*directories, *files):
+            os.lchown(os.path.join(directory, name), SANDBOX_UID, SANDBOX_UID)
+    os.lchown(root, SANDBOX_UID, SANDBOX_UID)
 
 
 class Workspace:
-    def __init__(self, root, forge, task_branch):
-        self.root = Path(root)
+    def __init__(self, root, forge, branch):
+        self.root, self.forge, self.config, self.branch = Path(root), forge, forge.config, branch
         self.path = self.root / "project"
-        self.git_dir = self.root / "repository.git"
-        self.control = self.root / "control"
-        self.forge = forge
-        self.branch = task_branch
         self.path.mkdir(parents=True, exist_ok=True)
-        self.control.mkdir(mode=0o700, parents=True, exist_ok=True)
-        helper = self.control / "askpass.py"
-        helper.write_text("#!" + sys.executable + "\nimport os,sys\nprint(os.environ['BANANA_GIT_USER'] if 'username' in sys.argv[1].lower() else os.environ['BANANA_GIT_CREDENTIAL'])\n")
-        helper.chmod(0o700)
-        self.environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
-                            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
-                            "GIT_ASKPASS": str(helper), "BANANA_GIT_USER": str(forge.identity.get("login", "bananavibe")),
-                            "BANANA_GIT_CREDENTIAL": forge.token, "GIT_LFS_SKIP_SMUDGE": "1"}
-        self.options = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-                        "-c", "credential.helper=", "-c", "protocol.ext.allow=never", "-c", "http.followRedirects=false",
-                        "-c", "core.attributesFile=/dev/null", "-c", "diff.external=", "-c", "core.autocrlf=false",
-                        "-c", "user.name=BananaVibe", "-c", "user.email=bananavibe@users.noreply.local"]
+        self.url = forge.clone_url(self.config.target_repository)
+        self.git = Git(self.root / "repository.git", work_tree=self.path, token=forge.token, username=forge.login,
+                       control_dir=self.root / "control")
+        self.remote_sha = None
 
-    def git(self, *args, check=True, text=True, timeout=180):
-        result = subprocess.run([*self.options, "--git-dir", str(self.git_dir), "--work-tree", str(self.path), *args],
-                                cwd=self.path, env=self.environment, capture_output=True, text=text, timeout=timeout)
-        if check and result.returncode:
-            raise RuntimeError(f"Git {args[0]} failed (exit {result.returncode}). Check target access or branch protection.")
-        return result
+    def prepare(self, expected_sha):
+        """Check out the task branch and confirm it is the recorded checkpoint."""
+        self.git.fetch(self.url, f"refs/heads/{self.branch}")
+        head = self.git.out("rev-parse", "FETCH_HEAD")
+        if expected_sha and head != expected_sha:
+            raise BranchMoved(f"The task branch `{self.branch}` has commits BananaVibe did not make "
+                              f"(expected `{expected_sha[:12]}`, found `{head[:12]}`). Review them, then "
+                              "use `/banana restart`, or reset the branch to the checkpoint and resume.")
+        self.git.run("checkout", "--quiet", "--force", "-B", self.branch, "FETCH_HEAD")
+        self.remote_sha = head
+        exclude = self.root / "repository.git" / "info" / "exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        exclude.write_text("\n".join((f"/{REPORT_DIR}/", *self.config.ignore)) + "\n")
+        (self.path / REPORT_DIR).mkdir(exist_ok=True)
+        give_to_sandbox(self.path)
 
-    def prepare(self):
-        if not self.git_dir.exists():
-            subprocess.run([*self.options, "init", "--bare", str(self.git_dir)], env=self.environment,
-                           capture_output=True, check=True)
-        self.git("config", "core.bare", "false")
-        self.git("config", "core.worktree", str(self.path))
-        self.git("fetch", "--no-tags", self.forge.clone_url(), f"refs/heads/{self.branch}", timeout=600)
-        self.git("checkout", "-B", self.branch, "FETCH_HEAD")
-        (self.git_dir / "info" / "exclude").write_text(".bananavibe-task/\n.git\n")
-        # A root-run Forgejo job still executes model tools as an unprivileged UID.
-        if os.geteuid() == 0:
-            for path in (self.path, *self.path.rglob("*")):
-                if not path.is_symlink():
-                    os.chown(path, 65532, 65532)
+    def head(self):
+        return self.git.out("rev-parse", "HEAD")
 
-    def files(self):
-        raw = self.git("ls-files", "--cached", "--others", "--exclude-standard", "-z", text=False).stdout
-        return [name.decode("utf-8", "strict") for name in raw.split(b"\0") if name and not name.startswith(b".bananavibe-task/")]
+    def _protected(self, name):
+        return any(name == path.rstrip("/") or name.startswith(path.rstrip("/") + "/")
+                   for path in self.config.forbidden_paths)
 
-    def verify(self, base=None):
-        maximum = self.forge.config.max_workspace_mb * 1024 * 1024
+    def size_mb(self):
         total = 0
-        for root, directories, files in os.walk(self.path, followlinks=False):
-            for name in (*directories, *files):
-                path = Path(root) / name
-                if path.is_symlink():
-                    resolved = path.resolve()
-                    if not resolved.is_relative_to(self.path.resolve()):
-                        raise ValueError("The task created a symlink outside its workspace.")
-                elif path.is_file():
-                    total += path.stat().st_size
-                    if path.stat().st_size > 128 * 1024 * 1024:
-                        raise ValueError("A task file exceeds 128 MiB.")
-                elif not path.is_dir():
-                    raise ValueError("Task workspaces cannot contain devices, sockets, or named pipes.")
-                if total > maximum:
-                    raise ValueError("The task workspace exceeded its configured storage allowance.")
-        self.git("add", "--all", "--", ".")
-        self.git("reset", "--quiet", "HEAD", "--", ".bananavibe-task")
-        changed = self.git("diff", "--cached", "--name-only", "-z", base or "HEAD", text=False).stdout.split(b"\0")
-        for raw in changed:
-            if not raw:
+        for directory, _, files in os.walk(self.path):
+            for name in files:
+                try:
+                    total += os.lstat(os.path.join(directory, name)).st_size
+                except OSError:
+                    pass
+        return total / (1024 * 1024)
+
+    def snapshot(self, message="Checkpoint maintenance draft"):
+        """Commit the working tree. Returns the list of reverted paths.
+
+        Changes to protected paths, embedded repositories and oversized
+        files are undone rather than committed, and the caller tells the
+        agent why. Call this only while the sandbox is paused or stopped.
+        """
+        if self.size_mb() > self.config.limits.max_workspace_mb:
+            raise ValueError(f"The workspace exceeded limits.max_workspace_mb "
+                             f"({self.config.limits.max_workspace_mb} MiB).")
+        self.git.run("add", "--all", "--", ".")
+        rejected, blobs = {}, {}
+        raw = self.git.run("diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "HEAD", text=False).stdout
+        fields = raw.split(b"\0")
+        for info, name in zip(fields[0::2], fields[1::2], strict=False):
+            if not info.startswith(b":"):
                 continue
-            name = raw.decode("utf-8", "strict")
-            if any(name == forbidden.rstrip("/") or name.startswith(forbidden.rstrip("/") + "/")
-                   for forbidden in self.forge.config.forbidden_paths):
-                raise ValueError("The task changed protected workflow or agent configuration. A maintainer must handle that change separately.")
-        return [name.decode() for name in changed if name]
+            old_mode, new_mode, _, new_oid, _ = info[1:].decode().split()
+            name = name.decode("utf-8", "surrogateescape")
+            if self._protected(name):
+                rejected[name] = "protected path"
+            elif new_mode == "160000" and old_mode != "160000":
+                rejected[name] = "embedded Git repository"
+            elif new_mode in {"100644", "100755"}:
+                blobs[name] = new_oid
+        if blobs:
+            sizes = self.git.run("cat-file", "--batch-check=%(objectsize)",
+                                 input="".join(oid + "\n" for oid in blobs.values())).stdout.split()
+            for name, size in zip(blobs, sizes, strict=True):
+                if int(size) > 50 * 1024 * 1024:
+                    rejected[name] = "file larger than 50 MiB"
+        for name in rejected:
+            self._revert(name)
+        if self.git.run("diff", "--cached", "--quiet", "HEAD", check=False).returncode:
+            self.git.run("commit", "--quiet", "--no-verify", "-m", message)
+        return rejected
 
-    def checkpoint(self):
-        self.verify()
-        if self.git("diff", "--cached", "--quiet", check=False).returncode:
-            self.git("commit", "--no-gpg-sign", "-m", "Maintenance draft checkpoint")
-        self.git("push", "--porcelain", self.forge.clone_url(), f"HEAD:refs/heads/{self.branch}")
-        return self.git("rev-parse", "HEAD").stdout.strip()
+    def _revert(self, name):
+        self.git.run("reset", "--quiet", "HEAD", "--", name, check=False)
+        if self.git.run("cat-file", "-e", f"HEAD:{name}", check=False).returncode == 0:
+            self.git.run("checkout", "--quiet", "HEAD", "--", name)
+        else:
+            target = self.path / name
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            elif target.exists() or target.is_symlink():
+                target.unlink()
 
-    def diff(self, base):
-        # No external diff drivers, text conversion, or repository hooks execute.
-        return self.git("diff", "--no-ext-diff", "--no-textconv", base, "HEAD", "--", ".").stdout[:120000]
+    def push(self):
+        """Push HEAD, but only if the remote branch is still where we left it."""
+        head = self.head()
+        if head == self.remote_sha:
+            return head
+        ref = f"refs/heads/{self.branch}"
+        result = self.git.run("push", "--quiet", "--porcelain", f"--force-with-lease={ref}:{self.remote_sha}",
+                              self.url, f"HEAD:{ref}", check=False)
+        if result.returncode:
+            output = result.stdout + result.stderr
+            if any(reason in output for reason in ("stale info", "fetch first", "non-fast-forward")):
+                raise BranchMoved(f"The task branch `{self.branch}` changed outside BananaVibe. "
+                                  "Review it before resuming.")
+            raise GitError("git push failed. Check that the bot can push to the target repository "
+                           "and that bananavibe/* branches are not protected.")
+        self.remote_sha = head
+        return head
 
-    def final_files(self, base):
-        return self.git("diff", "--name-only", "-z", base, "HEAD", text=False).stdout.decode().rstrip("\0").split("\0")
+    def export(self, destination):
+        """Write the committed tree (not the working tree) to destination."""
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        index = self.root / "export.index"
+        env = {"GIT_INDEX_FILE": str(index)}
+        self.git.run("read-tree", "HEAD", env=env)
+        self.git.run("checkout-index", "--all", "--force", f"--prefix={destination}/", env=env)
+        index.unlink(missing_ok=True)
+        give_to_sandbox(destination)
+        return destination
 
-    def assert_formatting(self, base):
-        if self.git("diff", "--check", base, "HEAD", check=False).returncode:
-            raise ValueError("git diff --check failed. Correct whitespace errors before completing the task.")
+    def changed_files(self, base):
+        raw = self.git.run("diff", "--name-only", "-z", base, "HEAD", text=False).stdout
+        return [item.decode("utf-8", "replace") for item in raw.split(b"\0") if item]
 
-    def tree_digest(self):
-        return self.git("write-tree").stdout.strip()
+    def diff(self, base, limit=120_000):
+        text = self.git.run("diff", "--no-ext-diff", "--no-textconv", "--stat", "--patch", base, "HEAD").stdout
+        return text if len(text) <= limit else text[:limit] + "\n[diff truncated]\n"
 
-    def read_report(self):
-        data = read_task_json(self.path, "result.json", 32000)
-        if data is None or data.get("status") not in {"complete", "blocked", "continue"}:
-            return {"status": "continue"}
-        return {"status": data["status"], "question": str(data.get("question", ""))[:6000]}
+    def whitespace_errors(self, base):
+        result = self.git.run("diff", "--check", base, "HEAD", check=False)
+        return result.stdout[-4000:] if result.returncode else ""

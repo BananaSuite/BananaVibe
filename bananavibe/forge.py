@@ -1,156 +1,205 @@
-"""Small GitHub / Forgejo API adapter. No repository token reaches the model."""
+"""GitHub and Forgejo REST calls. The forge token never leaves this process
+and its Git child processes; the coding sandbox never sees it."""
 
 import base64
-import json
-import time
 from urllib.parse import quote
 
-import requests
+from . import httpclient
+
+WRITE_PERMISSIONS = {"write", "maintain", "admin", "owner"}
 
 
 class ForgeError(RuntimeError):
-    def __init__(self, status, operation):
+    def __init__(self, status, what):
         self.status = status
-        super().__init__(f"Forge API {operation} returned HTTP {status}. Check repository access and retry.")
+        super().__init__(f"The forge refused to {what} (HTTP {status}). Check the bot's repository access.")
 
 
 class Conflict(ForgeError):
-    pass
+    """The resource changed or already exists (optimistic write lost)."""
 
 
 class Forge:
-    def __init__(self, config, token):
+    def __init__(self, config, token, *, transport=httpclient.request):
         if not token:
-            raise ValueError("BANANAVIBE_TOKEN is required.")
-        self.config = config
-        self.token = token
-        self.http = requests.Session()
-        self.http.trust_env = False
-        self.http.headers.update({"Authorization": ("Bearer " if config.forge == "github" else "token ") + token,
-                                  "Accept": "application/vnd.github+json" if config.forge == "github" else "application/json",
-                                  "User-Agent": "BananaVibe/2"})
-        try:
-            self.identity = self.request("GET", "/user")
-        except ForgeError as error:
-            # GitHub installation tokens can access repositories but have no
-            # user profile. Validate that token type before using its Git login.
-            if config.forge != "github" or error.status != 403:
-                raise
-            installation = self.request("GET", "/installation/repositories", params={"per_page": 1})
-            if not isinstance(installation, dict) or not isinstance(installation.get("repositories"), list):
-                raise ValueError("Unexpected GitHub installation response.") from error
-            self.identity = {"login": "x-access-token", "type": "Bot"}
+            raise ValueError("BANANAVIBE_TOKEN is not set. Add the bot token as an Actions secret.")
+        self.config, self.token, self._transport = config, token, transport
+        self.github = config.forge == "github"
+        self.headers = {"Authorization": ("Bearer " if self.github else "token ") + token}
+        if self.github:
+            self.headers.update({"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+        self.identity = self._identify()
 
-    def request(self, method, path, *, body=None, params=None, missing=False):
+    def _identify(self):
+        try:
+            return self.call("GET", "/user", what="read the bot identity")
+        except ForgeError as error:
+            # GitHub App installation tokens have no user profile but can
+            # still list their repositories; confirm that before trusting it.
+            if not self.github or error.status != 403:
+                raise
+            data = self.call("GET", "/installation/repositories", params={"per_page": 1},
+                             what="read the installation")
+            if not isinstance(data, dict) or not isinstance(data.get("repositories"), list):
+                raise ValueError("Unexpected GitHub installation response.") from error
+            return {"login": "x-access-token", "type": "Bot"}
+
+    @property
+    def login(self):
+        return str(self.identity.get("login") or "")
+
+    def call(self, method, path, *, body=None, params=None, missing=False, what="complete a request",
+             conflict=(409,)):
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("Invalid API path.")
-        for attempt in range(3):
-            try:
-                with self.http.request(method, self.config.api_url + path, json=body, params=params,
-                                       timeout=(10, 45), stream=True, allow_redirects=False) as response:
-                    status = response.status_code
-                    if status == 404 and missing:
-                        return None
-                    if status in {409, 422}:
-                        raise Conflict(status, method)
-                    if status >= 300:
-                        if method == "GET" and status in {429, 502, 503, 504} and attempt < 2:
-                            time.sleep(2 ** attempt)
-                            continue
-                        raise ForgeError(status, method)
-                    chunks, size = [], 0
-                    for chunk in response.iter_content(65536):
-                        size += len(chunk)
-                        if size > 4 * 1024 * 1024:
-                            raise RuntimeError("Forge response exceeded the limit.")
-                        chunks.append(chunk)
-                    raw = b"".join(chunks)
-                    return json.loads(raw) if raw else None
-            except requests.RequestException:
-                if method == "GET" and attempt < 2:
-                    time.sleep(2 ** attempt)
-                    continue
-                raise RuntimeError("The forge could not be reached; credentials and response bodies were withheld.") from None
+        url = self.config.api_url + path
+        if params:
+            url += "?" + "&".join(f"{quote(str(k))}={quote(str(v), safe='')}" for k, v in params.items())
+        try:
+            response = self._transport(method, url, headers=self.headers, body=body, timeout=45,
+                                       retries=2 if method == "GET" else 0)
+        except httpclient.HTTPError as error:
+            if error.status == 404 and missing:
+                return None
+            raise (Conflict if error.status in conflict else ForgeError)(error.status, what) from None
+        except httpclient.Unreachable as error:
+            raise RuntimeError(f"The forge API could not be reached: {error}") from None
+        return response.json()
 
-    def repo(self, name):
-        return self.request("GET", "/repos/" + name)
-
-    def maintainer(self, repo, login):
-        if not login or "/" in login:
-            return False
-        value = self.request("GET", f"/repos/{repo}/collaborators/{quote(login, safe='')}/permission", missing=True)
-        return bool(value and value.get("permission") in {"write", "maintain", "admin", "owner"})
-
-    def authorized(self, login):
-        return all(self.maintainer(repo, login) for repo in {self.config.control_repository, self.config.target_repository})
-
-    def issue(self, number):
-        return self.request("GET", f"/repos/{self.config.control_repository}/issues/{int(number)}")
-
-    def comments(self, number):
-        return self.pages(f"/repos/{self.config.control_repository}/issues/{int(number)}/comments")
-
-    def pages(self, path, params=None):
-        output = []
-        for page in range(1, 51):
-            data = self.request("GET", path, params={**(params or {}), "page": page, "per_page": 100, "limit": 100})
+    def pages(self, path, params=None, *, maximum=50, what="list items"):
+        items = []
+        for page in range(1, maximum + 1):
+            data = self.call("GET", path, params={**(params or {}), "page": page,
+                                                  ("per_page" if self.github else "limit"): 50}, what=what)
             if not isinstance(data, list):
                 raise RuntimeError("Unexpected forge list response.")
-            output.extend(data)
-            if len(data) < 100:
-                return output
-        raise RuntimeError("Forge result exceeds 5,000 entries. Archive old tasks or shorten the issue thread.")
+            items.extend(data)
+            if len(data) < 50:
+                return items
+        raise RuntimeError(f"More than {maximum * 50} results; archive old items first.")
+
+    # Repositories and permissions
+
+    def repo(self, name):
+        return self.call("GET", f"/repos/{name}", what=f"read {name}")
+
+    def permission(self, repository, login):
+        if not login or "/" in login:
+            return "none"
+        data = self.call("GET", f"/repos/{repository}/collaborators/{quote(login, safe='')}/permission",
+                         missing=True, what="read collaborator permissions")
+        return str((data or {}).get("permission") or "none")
+
+    def authorized(self, login):
+        """Commands need write access to both the control and the target repository."""
+        repositories = {self.config.control_repository, self.config.target_repository}
+        return all(self.permission(name, login) in WRITE_PERMISSIONS for name in repositories)
+
+    # Issues and comments (always in the control repository)
+
+    def _issues(self, suffix=""):
+        return f"/repos/{self.config.control_repository}/issues{suffix}"
+
+    def issue(self, number):
+        return self.call("GET", self._issues(f"/{int(number)}"), what="read the issue")
+
+    def comments(self, number):
+        return self.pages(self._issues(f"/{int(number)}/comments"), what="read issue comments")
 
     def comment(self, number, text):
-        return self.request("POST", f"/repos/{self.config.control_repository}/issues/{int(number)}/comments", body={"body": text[:60000]})
+        data = self.call("POST", self._issues(f"/{int(number)}/comments"), body={"body": text[:60000]},
+                         what="comment on the issue")
+        return (data or {}).get("id")
 
-    def close_issue(self, number):
-        return self.request("PATCH", f"/repos/{self.config.control_repository}/issues/{int(number)}", body={"state": "closed"})
+    def edit_comment(self, comment_id, text):
+        return self.call("PATCH", self._issues(f"/comments/{int(comment_id)}"), body={"body": text[:60000]},
+                         what="update a status comment")
 
-    def reopen_issue(self, number):
-        return self.request("PATCH", f"/repos/{self.config.control_repository}/issues/{int(number)}", body={"state": "open"})
+    def set_issue_state(self, number, state):
+        return self.call("PATCH", self._issues(f"/{int(number)}"), body={"state": state},
+                         what=f"mark the issue {state}")
 
-    def branch_sha(self, repo, name):
-        if self.config.forge == "github":
-            data = self.request("GET", f"/repos/{repo}/git/ref/heads/{quote(name, safe='')}", missing=True)
-            return data["object"]["sha"] if data else None
-        data = self.request("GET", f"/repos/{repo}/branches/{quote(name, safe='')}", missing=True)
+    # Branches and state files
+
+    def branch_sha(self, repository, name):
+        if self.github:
+            data = self.call("GET", f"/repos/{repository}/git/ref/heads/{quote(name, safe='/')}", missing=True,
+                             what="read a branch")
+            return data["object"]["sha"] if isinstance(data, dict) and "object" in data else None
+        data = self.call("GET", f"/repos/{repository}/branches/{quote(name, safe='')}", missing=True,
+                         what="read a branch")
         return data["commit"]["id"] if data else None
 
-    def create_branch(self, repo, name, sha, *, source_branch=None):
-        if self.config.forge == "github":
-            return self.request("POST", f"/repos/{repo}/git/refs", body={"ref": "refs/heads/" + name, "sha": sha})
-        return self.request("POST", f"/repos/{repo}/branches", body={"new_branch_name": name, "old_ref_name": sha})
+    def create_branch(self, repository, name, sha):
+        if self.github:
+            return self.call("POST", f"/repos/{repository}/git/refs", body={"ref": "refs/heads/" + name, "sha": sha},
+                             what="create a branch", conflict=(409, 422))
+        return self.call("POST", f"/repos/{repository}/branches", body={"new_branch_name": name, "old_ref_name": sha},
+                         what="create a branch", conflict=(409, 422))
 
     def content(self, path):
-        return self.request("GET", f"/repos/{self.config.control_repository}/contents/{quote(path, safe='/')}",
-                            params={"ref": self.config.state_branch}, missing=True)
+        return self.call("GET", f"/repos/{self.config.control_repository}/contents/{quote(path, safe='/')}",
+                         params={"ref": self.config.state_branch}, missing=True, what="read task state")
 
-    def put_content(self, path, content, previous_sha=None):
-        data = {"message": "Record BananaVibe task state", "branch": self.config.state_branch,
-                "content": base64.b64encode(content).decode()}
+    def put_content(self, path, raw, previous_sha=None, message="Record BananaVibe task state"):
+        body = {"message": message, "branch": self.config.state_branch, "content": base64.b64encode(raw).decode()}
         if previous_sha:
-            data["sha"] = previous_sha
-        method = "PUT" if self.config.forge == "github" or previous_sha else "POST"
-        return self.request(method, f"/repos/{self.config.control_repository}/contents/{quote(path, safe='/')}", body=data)
+            body["sha"] = previous_sha
+        # Forgejo creates files with POST and updates them with PUT.
+        method = "PUT" if self.github or previous_sha else "POST"
+        return self.call(method, f"/repos/{self.config.control_repository}/contents/{quote(path, safe='/')}",
+                         body=body, what="save task state", conflict=(409, 422))
 
-    def pull_request(self, branch, title, body):
-        repo = self.config.target_repository
-        owner = repo.split("/")[0]
-        existing = self.pages(f"/repos/{repo}/pulls", {"state": "all", "head": f"{owner}:{branch}"})
-        for pull in existing:
-            if pull.get("head", {}).get("ref") == branch:
-                if pull.get("state") == "closed":
-                    raise ValueError("The previous PR was closed or merged. Review its outcome; use /banana restart for a new contribution.")
-                # A resumed task may have changed the branch after a failed
-                # publication attempt. Keep its review text and checked SHA current.
-                updated = {"title": ("WIP: " if self.config.forge == "forgejo" else "") + title[:180], "body": body[:50000]}
-                return self.request("PATCH", f"/repos/{repo}/pulls/{int(pull['number'])}", body=updated)
-        payload = {"title": title[:180], "body": body[:50000], "head": branch, "base": self.config.base_branch, "draft": True}
-        if self.config.forge == "forgejo":
-            payload["title"] = "WIP: " + payload["title"]
-            payload.pop("draft")
-        return self.request("POST", f"/repos/{repo}/pulls", body=payload)
+    # Pull requests (always in the target repository)
 
-    def clone_url(self):
-        return f"{self.config.server_url}/{self.config.target_repository}.git"
+    def find_pull(self, branch):
+        repository = self.config.target_repository
+        if self.github:
+            owner = repository.split("/")[0]
+            pulls = self.call("GET", f"/repos/{repository}/pulls",
+                              params={"state": "all", "head": f"{owner}:{branch}", "per_page": 50},
+                              what="list pull requests")
+        else:
+            pull = self.call("GET", f"/repos/{repository}/pulls/{quote(self.config.base_branch, safe='')}/"
+                             f"{quote(branch, safe='/')}", missing=True, what="find the pull request")
+            if pull:
+                return pull
+            pulls = self.pages(f"/repos/{repository}/pulls", {"state": "all", "sort": "recentupdate"},
+                               maximum=10, what="list pull requests")
+        matches = [pull for pull in pulls or [] if (pull.get("head") or {}).get("ref") == branch]
+        return max(matches, key=lambda pull: pull.get("number", 0)) if matches else None
+
+    @staticmethod
+    def pull_open(pull):
+        return pull.get("state") == "open" and not pull.get("merged")
+
+    def publish_pull(self, branch, title, body):
+        """Create a draft PR for the branch, or refresh the open one."""
+        repository = self.config.target_repository
+        title, body = title[:180], body[:60000]
+        existing = self.find_pull(branch)
+        if existing:
+            if not self.pull_open(existing):
+                raise ValueError("The task's pull request was closed or merged. "
+                                 "Use `/banana restart` to prepare a new contribution.")
+            if not self.github:
+                title = "WIP: " + title
+            return self.call("PATCH", f"/repos/{repository}/pulls/{int(existing['number'])}",
+                             body={"title": title, "body": body}, what="update the pull request")
+        if not self.github:
+            return self.call("POST", f"/repos/{repository}/pulls",
+                             body={"title": "WIP: " + title, "body": body, "head": branch,
+                                   "base": self.config.base_branch}, what="open a pull request")
+        payload = {"title": title, "body": body, "head": branch, "base": self.config.base_branch, "draft": True}
+        try:
+            return self.call("POST", f"/repos/{repository}/pulls", body=payload, what="open a draft pull request",
+                             conflict=())
+        except ForgeError as error:
+            # Draft PRs are unavailable for private repositories on some plans.
+            if error.status != 422:
+                raise
+            payload.update(draft=False, title="[Draft] " + title)
+            return self.call("POST", f"/repos/{repository}/pulls", body=payload, what="open a pull request")
+
+    def clone_url(self, repository):
+        return f"{self.config.server_url}/{repository}.git"

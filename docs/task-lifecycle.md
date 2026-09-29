@@ -1,27 +1,42 @@
-# Task lifecycle and recovery
+# Task lifecycle
 
-An authorized issue or `/banana start` requests work. The controller verifies the configured model credential and target access, creates a branch from the configured base, and acknowledges the task on the issue. Issue text supplies the initial request; later guidance must arrive through an authorized command. Other comments are not appended to the model's instructions.
+## A run, step by step
 
-One runner holds an expiring lease stored in the issue repository's state branch. State changes use optimistic content revisions, so overlapping workflows cannot both claim the task. The runner renews its lease, polls commands, and posts progress at the configured interval, normally every two minutes.
+1. A maintainer opens an issue (with `open_issues = true`) or comments `/banana start`. BananaVibe checks they can write to both repositories, records the request and a fingerprint of the issue text they approved, and starts working in the same job.
+2. The runner takes a lease on the task record (compare-and-swap on the state branch). A second runner for the same issue sees the lease and exits as *busy*. A background heartbeat renews the lease and picks up new commands.
+3. The first run creates `bananavibe/<task-id>-<generation>` from the base branch. Later runs check out that branch and refuse to continue if someone else pushed to it.
+4. OpenCode starts in the sandbox, `prepare` runs, and the agent works through up to `max_iterations` turns. After every turn the controller pauses the container, commits the tree (reverting protected paths, embedded repositories and huge files) and pushes a checkpoint.
+5. When the agent reports completion, BananaVibe exports the committed tree, runs `git diff --check`, then runs `prepare` and every check in a fresh container. Failures go back to the agent verbatim.
+6. With everything passing, a separate request that sees only the diff writes the PR title and description. BananaVibe opens a draft PR (or updates the task's open one), links it on the issue and closes the issue.
 
-The controller restores the task branch into an isolated workspace, installs the configured dependencies, and runs a bounded completion loop. At each iteration it saves a coherent checkpoint to the branch. The engine must declare completion, continuation, or a specific human blocker. Completion requires source changes, all acceptance checks, a clean diff-format check, and a stable source tree. The container is stopped before publication; the controller rechecks the branch and validated tree.
+A status comment on the issue is edited as the run progresses. Each run ends with one new comment saying what happened and what you can do next.
 
-On success, a separate session summarizes only the proposed public diff. The controller opens an idempotent draft/WIP PR, posts its link to the issue, and closes the issue. A maintainer reviews and merges or closes the PR and may delete its branch. An issue marked complete means a contribution is ready for review; it does not mean production has been updated.
+## States
 
-| State | Meaning | Next action |
+| State | Meaning | What you can do |
 | --- | --- | --- |
-| Running | A leased runner is implementing or checking the task. | Wait, inspect status, or give an explicit command. |
-| Blocked | The engine needs human guidance, or the proposed result has no source changes. | `/banana answer TEXT` resumes with guidance. |
-| Paused | The time/iteration allowance ended or a recoverable interruption occurred. | `/banana resume` continues the saved branch. |
-| Interrupted | The runner stopped renewing its lease. | Inspect the workflow, then resume. |
-| Stopped | A maintainer requested cancellation. | Leave stopped, resume, or restart. |
-| Failed | Preparation, engine, access, publication, or an explicit fail command ended the run. | Correct the cause, then resume or restart. |
-| Complete | Checked changes have a PR linked on the source issue. | Human review and merge/close. |
+| queued | Recorded; a runner will pick it up. | Wait. |
+| running | A runner holds the lease. | `stop`, `answer`, `model`, `status`. |
+| blocked | The agent asked a question, completion had no changes, or the issue text changed after approval. | `answer TEXT`, or `resume` to approve edited text. |
+| paused | Time or iteration allowance used up, or the run was cancelled. | `resume`. |
+| interrupted | The runner vanished without finishing (found by the watchdog or `status`). | Check the job log, then `resume`. |
+| stopped | A maintainer stopped it. | `resume` or `restart`. |
+| failed | An error, such as a model key, a preparation command or a moved branch, or `/banana fail`. | Fix the cause, then `resume` or `restart`. |
+| complete | Checks passed and a draft PR is open. | Review and merge or close it, or `answer` to revise. |
 
-`/banana stop` stops at the next controller polling point and attempts a final checkpoint after terminating the engine. Docker/API operations have bounded timeouts; cancellation is not instantaneous. It keeps the issue open and retains work. `/banana fail REASON` records an explicit failure. Workflow cancellation, runner loss, or a hard timeout may prevent a final checkpoint; resume restores the last successfully pushed checkpoint, not unsaved container files.
+Work is saved on the task branch in every state. `resume` always continues from the last checkpoint. `restart` starts a new generation from the base branch and keeps the old branch.
 
-`/banana resume` keeps the branch and reruns the configured preparation and acceptance checks. A new engine session reads the original issue and saved maintainer guidance. `/banana model ALIAS` during a run checkpoints and switches sessions when the controller observes it. `/banana restart` preserves the old branch and starts a new generation from the base branch. It does not force-push away previous work.
+## Changing a running task
 
-If publication fails after a PR is created, its URL and branch remain recoverable. A retry finds the existing open PR. A closed or merged PR is not silently reused; restart to prepare a new contribution. If someone changes the working branch during final publication, the controller stops and asks for review/resume.
+- `/banana answer TEXT` while running is delivered to the agent in the same session at its next safe point.
+- `/banana model ALIAS` switches models at the next safe point with a fresh session on the saved work.
+- `/banana stop` stops at the next safe point, within `poll_seconds` plus the current operation, and saves a checkpoint.
+- A command recorded while a run is finishing is not lost: the runner continues, or tells you to `resume` if its time is up.
 
-A model saying the task is complete does not show that every requirement is met. Configure checks that test the requested behavior and review the resulting code. BananaVibe never treats a plan, an exhausted budget, failed checks, or a request for help as successful completion.
+## Revising a finished task
+
+When review turns up something to change, comment `/banana answer TEXT` on the (closed) issue. BananaVibe reopens it, continues on the same branch, reruns the checks and updates the same PR. If the PR was merged or closed, use `/banana restart` for a new contribution instead.
+
+## What "complete" means
+
+The agent claimed completion, `git diff --check` passed, and every configured check passed on a clean checkout of the exact commit in the PR. It does not mean the change is correct, complete or safe. The checks are only as good as you configure them, and a person must review the code.

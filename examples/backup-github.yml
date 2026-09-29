@@ -1,4 +1,6 @@
-name: Optional encrypted Agent backup
+# Optional: encrypted backups of BananaVibe's task data. See docs/backups.md.
+# Copy to .github/workflows/bananavibe-backup.yml in the issue repository.
+name: BananaVibe backup
 on:
   workflow_dispatch:
   schedule:
@@ -17,22 +19,18 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-      - name: Install encryption tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y age
-      - name: Fetch reviewed BananaVibe tooling
+      - name: Install age
+        run: sudo apt-get update -q && sudo apt-get install -yq age
+      - name: Fetch the reviewed BananaVibe release
         env:
-          AGENT_REVISION: ${{ vars.BANANAVIBE_REVISION }}
+          BANANAVIBE_REVISION: ${{ vars.BANANAVIBE_REVISION }}
         run: |
           set -euo pipefail
-          [[ "$AGENT_REVISION" =~ ^[a-f0-9]{40}$ ]] || { echo 'Set BANANAVIBE_REVISION to the reviewed published commit.'; exit 1; }
-          git init .bananavibe-backup-tool
-          git -C .bananavibe-backup-tool -c core.hooksPath=/dev/null fetch --depth=1 https://github.com/BananaSuite/BananaVibe.git "$AGENT_REVISION"
-          git -C .bananavibe-backup-tool -c core.hooksPath=/dev/null checkout --detach FETCH_HEAD
-          python3 -m venv .bananavibe-backup-tool/.venv
-          .bananavibe-backup-tool/.venv/bin/python -m pip install -r .bananavibe-backup-tool/requirements.txt
-      - name: Back up Agent data
+          [[ "$BANANAVIBE_REVISION" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::Set the BANANAVIBE_REVISION variable to a reviewed commit SHA.'; exit 1; }
+          git init -q .bananavibe-tool
+          git -C .bananavibe-tool -c core.hooksPath=/dev/null fetch -q --depth=1 https://github.com/BananaSuite/BananaVibe.git "$BANANAVIBE_REVISION"
+          git -C .bananavibe-tool -c core.hooksPath=/dev/null checkout -q --detach FETCH_HEAD
+      - name: Back up
         env:
           BANANAVIBE_TOKEN: ${{ secrets.BANANAVIBE_BACKUP_READ_TOKEN }}
           BACKUP_REPO_TOKEN: ${{ secrets.BACKUP_REPO_TOKEN }}
@@ -41,4 +39,4 @@ jobs:
           BACKUP_FORGE: ${{ vars.BACKUP_FORGE }}
           BACKUP_NAME: ${{ vars.BACKUP_NAME }}
           BACKUP_USERNAME: ${{ vars.BACKUP_USERNAME }}
-        run: .bananavibe-backup-tool/.venv/bin/python .bananavibe-backup-tool/scripts/backup_action.py --config .bananavibe.toml
+        run: python3 -P .bananavibe-tool/scripts/backup_action.py --config .bananavibe.toml

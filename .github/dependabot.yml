@@ -1,16 +1,14 @@
 version: 2
 updates:
-  # Python dependencies are declared as ranges, so a compromised release inside
-  # a range would install silently. These pull requests make each change visible.
-  - package-ecosystem: pip
-    directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-  # Workflow actions are pinned to commit SHAs, which never float. Without this
-  # they would simply go stale.
+  # Actions are pinned to commit SHAs; this keeps them from going stale.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+  # The sandbox base image is pinned by digest (Dockerfile.sandbox).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

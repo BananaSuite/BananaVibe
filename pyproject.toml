@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bananavibe"
+dynamic = ["version"]
+description = "Issue-driven maintenance drafts: a sandboxed coding agent prepares checked branches and draft pull requests for maintainer review."
+readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "Luca Zani and all contributors" }]
+requires-python = ">=3.11"
+# No runtime dependencies: the Action runs on the runner's Python without a
+# virtual environment or network installs.
+dependencies = []
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/BananaSuite/BananaVibe"
+Issues = "https://github.com/BananaSuite/BananaVibe/issues"
+
+[project.scripts]
+bananavibe = "bananavibe.cli:main"
+
+[tool.setuptools]
+packages = ["bananavibe", "banana_backup"]
+
+[tool.setuptools.dynamic]
+version = { attr = "bananavibe.__version__" }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = ["docker: needs a working Docker daemon and builds the sandbox image (run with -m docker)"]
+addopts = "-m 'not docker'"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+# Correctness rules plus a few that catch real mistakes; style is left alone.
+select = ["F", "E9", "B", "UP", "S102", "S307", "PLE", "RUF100"]
+ignore = ["UP015"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B017", "S"]
+# Shared with BananaWiki and BananaChat and locked by banana_backup/shared-files.json;
+# change them only through scripts/sync_backups.py, never for style.
+"banana_backup/**" = ["UP"]
+"tests/test_git_backups.py" = ["UP", "F401"]

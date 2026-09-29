@@ -1,12 +1,25 @@
-FROM node:24-trixie-slim
+# The task sandbox: OpenCode plus common build tools. The same image runs the
+# gateway (python3 /opt/bananavibe/gateway.py), the agent and the checker.
+# BananaVibe tags local builds with a hash of this file and sandbox/, so any
+# change here is picked up by runners automatically.
+FROM node:24-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-requests python3-venv git age curl ca-certificates build-essential ripgrep unzip \
+    && apt-get install -y --no-install-recommends \
+        python3 python3-venv python3-pip python3-dev git ca-certificates curl build-essential \
+        ripgrep unzip xz-utils jq procps \
     && rm -rf /var/lib/apt/lists/*
-COPY sandbox/ /opt/bananavibe/
-COPY LICENSE NOTICE /opt/bananavibe/
-RUN python3 /opt/bananavibe/fetch_opencode.py /usr/local/bin/opencode
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-USER 1000:1000
+
+COPY sandbox/fetch_opencode.py /opt/bananavibe/fetch_opencode.py
+RUN python3 /opt/bananavibe/fetch_opencode.py /usr/local/bin/opencode \
+    && rm /opt/bananavibe/fetch_opencode.py
+
+COPY sandbox/gateway.py sandbox/OPENCODE-LICENSE LICENSE NOTICE /opt/bananavibe/
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 npm_config_update_notifier=false
+LABEL org.opencontainers.image.title="BananaVibe sandbox" \
+      org.opencontainers.image.source="https://github.com/BananaSuite/BananaVibe" \
+      org.opencontainers.image.licenses="AGPL-3.0-only AND MIT"
+USER 65532:65532
 WORKDIR /workspace
 ENTRYPOINT ["opencode"]

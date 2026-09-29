@@ -2,67 +2,64 @@
 
 # BananaVibe
 
-**BananaVibe** lets BananaWiki and BananaChat maintainers try out features quickly and keep up with routine maintenance. Start it from a GitHub or Forgejo issue; it runs OpenCode in Actions and opens a draft pull request for review.
+BananaVibe is a GitHub and Forgejo Action for maintainers. You describe a change in an issue, or comment `/banana start` on an existing one. BananaVibe runs the [OpenCode](https://github.com/anomalyco/opencode) coding agent in a Docker sandbox, runs your tests against what the agent committed, and opens a draft pull request once they pass. Merging stays with you.
 
-The workflow can live in the contribution repository or in a separate private issue repository. The bot checks maintainer access, works on its own branch, reports progress, runs the configured checks, and links the draft PR before closing the issue. Merging stays with the maintainer.
+We wrote it to keep [BananaWiki](https://github.com/BananaSuite/BananaWiki) and [BananaChat](https://github.com/BananaSuite/BananaChat) moving: first drafts of small features, bug fixes, regression tests, dependency bumps and documentation. It works with any repository that has a test command.
 
-Typical tasks include a first version of a small feature to try out, small bug fixes, focused regression tests, documentation updates, and dependency maintenance. Maintainers remain responsible for design, code review, testing, and releases.
+## How it works
 
-## Install the workflow
+1. A maintainer starts a task. Only people with write access to both the issue repository and the target repository can use commands, and other comments never reach the agent.
+2. BananaVibe creates a `bananavibe/…` branch and starts OpenCode in a container that holds neither the forge token nor the real model key. The container reaches the model and the internet only through a per-task gateway, which enforces a model, a call budget and a host allowlist.
+3. After every agent turn, the working tree is committed and pushed. A stop or timeout saves the work so far; a hard crash can lose at most the turn in progress.
+4. When the agent says it is done, BananaVibe runs your checks itself, in a fresh container on a clean copy of the commit. Failures go back to the agent.
+5. When everything passes, a draft PR is opened. Its description is written from the diff alone, so issue text and guidance from a private repository are never given to it.
 
-1. Choose the repository where issues and prompts will live. Keep it private if the discussion should be private.
-2. Copy [examples/github.yml](examples/github.yml) to `.github/workflows/bananavibe.yml`, or [examples/forgejo.yml](examples/forgejo.yml) to `.forgejo/workflows/bananavibe.yml`.
-3. Copy [examples/bananawiki.toml](examples/bananawiki.toml) or [examples/bananachat.toml](examples/bananachat.toml) to `.bananavibe.toml`. Set the issue repository, target repository, branch, model, and checks. For Forgejo, set `forge = "forgejo"` and your instance's HTTPS `server_url`.
-4. Add `BANANAVIBE_TOKEN` and the named model keys as Actions secrets. Grant the bot access to both repositories, including branch creation, state-file updates, issue comments/closing, and pull-request creation. Use a dedicated bot account or a scoped GitHub App token.
-5. Pin the BananaVibe action to the reviewed release commit, then commit the workflow and configuration to the issue repository's default branch.
+If the issue is edited after a maintainer approved it, the task pauses until someone approves the new text. The Action needs nothing beyond Python's standard library and Docker.
 
-The runner needs Linux, Python 3.11+, Git, and Docker. GitHub's Ubuntu runners provide these. Forgejo uses a dedicated Linux host runner labeled `bananavibe`; [setup details](docs/deployment.md) include runner configuration and permissions. The target may be private. Git credentials remain with the controller.
+## Quick start (GitHub)
 
-Validate configuration locally without contacting a forge:
+1. In the repository where issues will live (it can be the target itself, or a private "prompts" repository), copy [`examples/github.yml`](examples/github.yml) to `.github/workflows/bananavibe.yml`.
+2. Copy [`examples/bananawiki.toml`](examples/bananawiki.toml) to `.bananavibe.toml` and edit the repositories, model, `prepare` and `checks`. Every key is documented in [configuration](docs/configuration.md).
+3. Add Actions secrets: `BANANAVIBE_TOKEN` (a bot token or GitHub App token with Contents, Issues and Pull requests read/write on both repositories) and the model key named by `api_key_env`.
+4. Validate locally: `python3 -m bananavibe check-config --config .bananavibe.toml` (from a checkout of this repository).
+5. Commit both files to the default branch, open an issue describing a change, and watch the status comment.
 
-```sh
-python3 -m bananavibe --config examples/bananawiki.toml --check-config
-```
+Forgejo works the same way with [`examples/forgejo.yml`](examples/forgejo.yml) and a host runner. See [deployment](docs/deployment.md).
 
-## Issue commands
+## Commands
 
-Only maintainers with write access to both repositories can start or control a task. Commands occupy their own comment.
+Commands must be the entire comment.
 
 | Command | Effect |
 | --- | --- |
-| `/banana help` | List commands. |
-| `/banana start` | Start work on an existing issue. |
-| `/banana status` | Show status and checkpoint. |
-| `/banana stop` | Stop and retain the working branch. |
-| `/banana resume` | Continue saved work. |
-| `/banana restart` | Start from the base on a new branch. |
-| `/banana models` | List configured model aliases. |
-| `/banana model ALIAS` | Change model, including during a running task. |
-| `/banana answer TEXT` | Answer a request for guidance and resume. |
-| `/banana fail REASON` | End the task as failed. |
+| `/banana start` | Begin work on this issue. |
+| `/banana status` | Show state, branch, checkpoint and pull request. |
+| `/banana answer TEXT` | Give guidance and continue. On a finished task, revise its open PR. |
+| `/banana stop` | Stop at the next safe point; work stays on the branch. |
+| `/banana resume` | Continue from the last checkpoint (also approves an edited issue). |
+| `/banana restart` | Start over from the base branch on a new branch; the old one is kept. |
+| `/banana models` | List the configured models. |
+| `/banana model ALIAS` | Switch model, even while a task runs. |
+| `/banana fail REASON` | Mark the task failed. |
+| `/banana help` | List the commands. |
 
-Tasks have time and iteration limits. Work stops when its checks pass, it needs guidance, or a limit is reached. Use `resume` to continue from a saved checkpoint. A scheduled watchdog records interrupted runners; [task recovery](docs/task-lifecycle.md) covers cancellation and retries.
+Each run is bounded by `limits.max_minutes` and `limits.max_iterations`. When the agent needs a decision it asks on the issue and waits for `/banana answer`. See the [task lifecycle](docs/task-lifecycle.md).
 
-## Prompts and review
+## Upgrading from 2.x
 
-Private prompts, guidance, and task metadata stay in the issue repository. Working branches contain proposed code. PR descriptions are generated in a separate session that sees only the public diff; issue titles, private links, conversation logs, and OpenCode share links are not copied into PRs. Generated code still needs review, including for unintended disclosure of information provided in a task.
+Change the Action reference to `@v3.0.0` (or its commit SHA). Configuration, task records, branches and backups are compatible, and running tasks continue. Then optionally run `bananavibe migrate-state` once. See [UPGRADING.md](UPGRADING.md), and the [review of 2.0](docs/review-2.0.md) for what changed and why.
 
-OpenCode runs in an unprivileged Docker container with only its project and temporary state mounted. Its gateway supplies narrowly scoped model access; the container receives neither the forge token nor the real model key. See [security boundaries](docs/security-model.md).
+## Documentation
 
-## Backups
+- [Deployment](docs/deployment.md): tokens, runners, GitHub and Forgejo
+- [Configuration](docs/configuration.md): every `.bananavibe.toml` key
+- [Task lifecycle](docs/task-lifecycle.md): states, recovery, revising PRs
+- [Security model](docs/security-model.md): boundaries and what they do not cover
+- [Backups](docs/backups.md): optional encrypted off-site copies
+- [Development](docs/development.md): architecture and running the tests
 
-[Optional encrypted backups](docs/backups.md) save configuration, task state, issue transcripts, and Git checkpoints in a dedicated private GitHub or Forgejo repository. Restore first creates a private review directory. Explicit state recovery keeps unfinished tasks paused and preserves newer branches for human review. Save the recovery key offline; runner secrets and the forge's own issue/PR database need separate recovery.
+## History, ownership and license
 
-## Why it exists
+Started by Luca Zani ([OverloadedTech](https://github.com/OverloadedTech)) on 13 August 2026 as BananaAgent, at Officina Tecnologica. It was internal until September 2026. The public history starts from a clean export because the private history contains credentials; see [NOTICE](NOTICE).
 
-BananaWiki and BananaChat are large enough that trying an idea, bumping a dependency or fixing stale documentation adds up to steady work. BananaVibe was written to take that load, so a feature can be tried quickly and the routine upkeep does not pile up. Nothing it writes reaches a default branch until a person has read it.
-
-It was an internal tool until September 2026, and the repository begins at a single commit because its development history is private and contains forge tokens and runner configuration. See [NOTICE](NOTICE) for the original dates.
-
-## Ownership and license
-
-Originally started by Luca Zani ([OverloadedTech](https://github.com/OverloadedTech)) on 13 August 2026, the date of its first recorded project commit. It was first called BananaAgent. Developed at Officina Tecnologica.
-
-Copyright © 2026 Luca Zani and all contributors. Each contributor retains copyright in their contributions.
-
-BananaVibe uses **AGPL-3.0-only**. Personal and commercial use are permitted. OpenCode remains MIT licensed; its notice is retained. See [LICENSE](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md), [contributing](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md), and [security reports](SECURITY.md).
+Copyright © 2026 Luca Zani and all contributors. Each contributor retains copyright in their contributions. BananaVibe is licensed **AGPL-3.0-only**. OpenCode is MIT-licensed; see [third-party notices](THIRD_PARTY_NOTICES.md). Please read [contributing](CONTRIBUTING.md), the [code of conduct](CODE_OF_CONDUCT.md) and [security reporting](SECURITY.md).

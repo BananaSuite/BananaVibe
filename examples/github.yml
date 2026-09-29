@@ -1,11 +1,14 @@
-name: BananaVibe maintenance
+# Copy to .github/workflows/bananavibe.yml in the issue (control) repository.
+name: BananaVibe
 on:
   issues:
     types: [opened]
   issue_comment:
     types: [created]
   schedule:
-    - cron: '*/10 * * * *'
+    # Watchdog: marks tasks whose runner vanished as interrupted. Hourly is plenty;
+    # any command on the issue also reconciles its task immediately.
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       issue:
@@ -19,24 +22,31 @@ on:
         type: string
 permissions:
   contents: read
+# Do not add a concurrency group that cancels runs: a /banana stop must be able
+# to reach a task that is already running. Leases prevent double work.
 jobs:
-  maintenance:
+  bananavibe:
+    # Skip cheaply for comments that are not commands and for people without an
+    # association with the repository. BananaVibe still checks write access itself.
     if: >-
-      github.event_name != 'issue_comment' ||
-      startsWith(github.event.comment.body, '/banana ') ||
-      startsWith(github.event.comment.body, '/bananavibe ') ||
-      github.event.comment.body == '/banana' ||
-      github.event.comment.body == '/bananavibe'
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)) ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/banana') &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # limits.max_minutes (default 45) plus time to build the sandbox image and
+    # save a final checkpoint. Raise both together.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-      # Pin the published BananaVibe commit before enabling the workflow.
-      - uses: BananaSuite/BananaVibe@main
+      # Pin to the full commit SHA of a reviewed release, e.g. @<sha> # v3.0.0
+      - uses: BananaSuite/BananaVibe@v3.0.0
         env:
           BANANAVIBE_TOKEN: ${{ secrets.BANANAVIBE_TOKEN }}
+          # One line per api_key_env named in .bananavibe.toml:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

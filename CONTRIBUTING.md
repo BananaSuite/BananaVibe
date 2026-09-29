@@ -1,20 +1,39 @@
 # Contributing to BananaVibe
 
-See the [development guide](docs/development.md) for the controller, runner,
-engine, gateway, and backup module map.
+Thank you for helping. BananaVibe prepares drafts that maintainers review, so
+changes must preserve four things: only maintainers can drive it, private
+prompts stay private, work is always recoverable, and people decide what
+merges.
 
-BananaVibe prepares feature trials and maintenance drafts for BananaWiki and BananaChat. Changes must preserve maintainer authorization, private prompt separation, recoverable tasks, and human control over merging.
+## Getting started
 
-Use Python 3.11 or newer. Install `requirements.txt` and `pytest`, then run `python -m pytest -q`. The tests use local Git repositories and HTTP fixtures; no forge account or paid model is needed. Test the real Docker/OpenCode path on a disposable runner when changing the engine or gateway.
+Read the [development guide](docs/development.md) for the module map and test
+commands. In short, with Python 3.11+, Git and age installed:
 
-Encrypted backup tests require Git and age (`apt install age` on Debian/Ubuntu); they use disposable local repositories and dummy credentials. Run `python scripts/sync_backups.py --check` for the backup code shared by all three applications. After reviewing a shared change, use `--record` and `--write ../OTHER_CHECKOUT`, review each diff, and commit the manifests with the implementation. The copy refuses unrecorded changes in the destination.
+```sh
+python -m pip install pytest ruff
+python -m ruff check . && python -m pytest -q
+```
 
-The task image provides Python 3.13 for the applications' acceptance checks. Bump its default image tag when changing the Dockerfile or bundled gateway so persistent runners build the new image instead of reusing an older cached tag.
+Changes to `bananavibe/engine.py`, `sandbox/` or `Dockerfile.sandbox` must also
+pass the Docker test: `python -m pytest -q -m docker`. CI runs it on every pull
+request.
 
-Describe the user-visible behavior, failure recovery, and validation in each PR. A coding agent may write the first draft, but a maintainer must review the design and the resulting code. Passing checks are evidence for review and do not permit an automatic merge.
+## Pull requests
 
-Never place tokens, private prompts, Actions logs, or production data in examples or tests. Workflow/configuration changes are privileged changes and require direct maintainer review. See [security boundaries](docs/security-model.md) and [task lifecycle](docs/task-lifecycle.md).
+- Describe the user-visible behavior, how failures recover, and how you validated it.
+- Add or update tests. The suite uses real Git repositories, so most behavior can be tested without mocks.
+- Keep BananaVibe dependency-free and compatible with existing configuration and schema-1 task records. Explain any upgrade steps in `UPGRADING.md` and `CHANGELOG.md`.
+- Changes to workflows, the Action, credentials handling or the sandbox boundary need a maintainer's direct review.
+- `banana_backup/` is shared with BananaWiki and BananaChat. See `scripts/sync_backups.py --help` before touching it.
+- A coding agent, including BananaVibe itself, may write a first draft, but a person must review the design and the code. Passing checks never justify merging on their own.
 
-Contributions use the repository's AGPL-3.0-only license. Contributors retain copyright in their contributions. Preserve OpenCode's MIT notice and other third-party notices.
+Never put tokens, private prompts, Actions logs or production data in examples,
+tests or issues.
 
-Discussions and reviews follow the [code of conduct](CODE_OF_CONDUCT.md).
+## Licensing
+
+Contributions are made under the repository's AGPL-3.0-only license, and
+contributors keep copyright in their contributions. Keep OpenCode's MIT notice
+and other third-party notices intact. Discussions and reviews follow the
+[code of conduct](CODE_OF_CONDUCT.md).

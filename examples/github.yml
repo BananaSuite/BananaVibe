@@ -7,7 +7,7 @@ on:
     types: [created]
   schedule:
     # Watchdog: marks tasks whose runner vanished as interrupted. Hourly is plenty;
-    # any command on the issue also reconciles its task immediately.
+    # /banana status reconciles a task at once, and start or resume restarts it.
     - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
@@ -43,8 +43,8 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-      # Pin to the full commit SHA of a reviewed release, e.g. @<sha> # v3.0.0
-      - uses: BananaSuite/BananaVibe@v3.0.0
+      # Pin to the full commit SHA of a reviewed release, e.g. @<sha> # v1.6.0
+      - uses: BananaSuite/BananaVibe@v1.6.0
         env:
           BANANAVIBE_TOKEN: ${{ secrets.BANANAVIBE_TOKEN }}
           # One line per api_key_env named in .bananavibe.toml:

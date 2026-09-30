@@ -31,7 +31,7 @@ working installation. Check the workflow log for them.
 | --- | --- | --- |
 | `prepare` | `[]` | Commands (argument lists) that install dependencies. They run in the agent's container before work starts, and again in a fresh container before every check run. `/state` is private scratch space, such as `/state/venv`. |
 | `checks` | required | Commands that must all pass on a clean checkout of the committed files before a PR opens. Choose checks that prove the requested behavior. |
-| `forbidden_paths` | workflows, local actions, `.bananavibe.toml` | Paths the agent may not change. Its edits there are reverted and it is told why. Setting this replaces the defaults. |
+| `forbidden_paths` | workflows, local actions, `.bananavibe.toml`, `.gitmodules` | Paths the agent may not change. Its edits there are reverted and it is told why. Setting this replaces the defaults. |
 | `ignore` | `[]` | Extra untracked patterns never to commit, added to the built-in list of build and test caches (`__pycache__/`, `.pytest_cache/`, `node_modules/`, …). |
 | `image` | `""` | Sandbox image. Empty means build it locally from this release (cached per runner). Set it to a published digest, such as `ghcr.io/bananasuite/bananavibe-sandbox@sha256:…`, to skip the build on hosted runners. |
 
@@ -56,7 +56,7 @@ The key is read by BananaVibe and handed only to the per-task gateway. The sandb
 allow = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"]
 ```
 
-`allow` lists the public hosts the sandbox may reach through the gateway. `*.example.org` matches subdomains, and `"*"` (the default, as in 2.x) allows any public host. Private, loopback, link-local and cloud-metadata addresses are always refused. Model inference does not count against this list. List what `prepare` needs: package registries, and Git hosts for Git dependencies.
+`allow` lists the public hosts the sandbox may reach through the gateway. `*.example.org` matches subdomains, and `"*"` (the default, as in the preview release) allows any public host. Private, loopback, link-local and cloud-metadata addresses are always refused. Model inference does not count against this list. List what `prepare` needs: package registries, and Git hosts for Git dependencies.
 
 ## Limits
 
@@ -71,6 +71,6 @@ All are whole numbers under `[limits]`.
 | `memory_mb` | 4096 | 512–32768 | Memory for the agent and checker containers. |
 | `cpus` | 2 | 1–32 | CPUs for those containers. |
 | `max_workspace_mb` | 512 | 16–8192 | Maximum size of the working tree, including ignored files. |
-| `poll_seconds` | 15 | 1–60 | How often the runner re-reads task state (commands, stops). |
+| `poll_seconds` | 15 | 1–60 | How often the runner re-reads task state (commands, stops). At most a third of `lease_seconds`. |
 | `progress_seconds` | 120 | 30–1800 | How often the status comment is refreshed. |
 | `lease_seconds` | 300 | 60–900 | How long a silent runner keeps its claim on a task. |

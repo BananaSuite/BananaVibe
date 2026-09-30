@@ -133,7 +133,9 @@ class Controller:
                     state["operation"] = "revise"
                     outcome["reopen"] = True
             elif name in {"start", "resume"}:
-                if name == "start" and state["status"] in ACTIVE and state["desired"] == "running" and state["events"]:
+                # A repeated start is ignored only while a runner really holds the
+                # task; a queued or running task whose runner vanished starts again.
+                if name == "start" and live and state["status"] in ACTIVE and state["desired"] == "running":
                     return None
                 state.update(desired="running", status="running" if live else "queued", approved=approved, reason="")
                 if complete:

@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -32,6 +33,7 @@ IMAGE_INPUTS = ("Dockerfile.sandbox", "sandbox/gateway.py", "sandbox/fetch_openc
 DOCKER_ENV_KEYS = ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_CERT_PATH",
                    "DOCKER_TLS_VERIFY", "XDG_RUNTIME_DIR", "TMPDIR")
 TAIL = 12_000
+TASK_LABEL = "org.bananavibe.task-id"
 
 
 class EngineError(RuntimeError):
@@ -54,6 +56,25 @@ def docker(*args, check=True, timeout=120):
         detail = result.stderr.strip().splitlines()[-1:] or ["no output"]
         raise EngineError(f"docker {args[0]} failed: {detail[0][:300]}")
     return result
+
+
+def sweep(task):
+    """Remove what a hard-killed earlier run of this task left on this host.
+
+    Only the runner holding the task's lease calls this, so nothing it finds
+    for the task can belong to a live run. That includes the temporary
+    directory holding the real model key.
+    """
+    if not re.fullmatch(r"[0-9a-f]{16}", task or ""):
+        return
+    label = f"label={TASK_LABEL}={task}"
+    containers = docker("ps", "--all", "--quiet", "--filter", label, check=False, timeout=60).stdout.split()
+    if containers:
+        docker("rm", "--force", "--volumes", *containers, check=False, timeout=60)
+    for network in docker("network", "ls", "--quiet", "--filter", label, check=False, timeout=60).stdout.split():
+        docker("network", "rm", network, check=False, timeout=30)
+    for leftover in Path(tempfile.gettempdir()).glob(f"bananavibe-engine-{task}-*"):
+        shutil.rmtree(leftover, ignore_errors=True)
 
 
 def image_tag():
@@ -103,14 +124,16 @@ def ensure_image(config, pulse=lambda *_: None, log=print):
 class Engine:
     """One task's gateway, agent and (on demand) checker containers."""
 
-    def __init__(self, config, model, workspace, pulse, *, image, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, config, model, workspace, pulse, *, image, task="", clock=time.monotonic, sleep=time.sleep):
         self.config, self.model, self.workspace, self.pulse = config, model, Path(workspace), pulse
-        self.image, self.clock, self.sleep = image, clock, sleep
+        self.image, self.task, self.clock, self.sleep = image, task, clock, sleep
         self.name = "bananavibe-" + secrets.token_hex(6)
         self.internal, self.outside = self.name + "-internal", self.name + "-egress"
         self.gateway, self.agent = self.name + "-gateway", self.name + "-agent"
         self.server_secret, self.control_secret = secrets.token_hex(24), secrets.token_hex(24)
-        self._temporary = tempfile.TemporaryDirectory(prefix="bananavibe-engine-")
+        sweep(task)
+        self._temporary = tempfile.TemporaryDirectory(prefix=f"bananavibe-engine-{task}-" if task else
+                                                      "bananavibe-engine-")
         self.root = Path(self._temporary.name)
         self.port = None
         self.session = None
@@ -124,7 +147,10 @@ class Engine:
                 "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", str(self.config.limits.cpus),
                 "--user", f"{uid}:{gid}", "--ulimit", "fsize=268435456:268435456", "--ulimit", "nofile=4096:4096",
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g,mode=1777", "--label", "org.bananavibe.task=" + self.name,
-                "--log-driver", "none"]
+                *self._task_label(), "--log-driver", "none"]
+
+    def _task_label(self):
+        return ["--label", f"{TASK_LABEL}={self.task}"] if self.task else []
 
     def _private_json(self, name, value):
         path = self.root / name
@@ -174,8 +200,10 @@ class Engine:
             "enabled_providers": ["task"], "permission": "allow", "autoupdate": False, "share": "disabled"})
         state = self._state_dir("agent-state")
 
-        docker("network", "create", "--internal", "-o", "com.docker.network.bridge.inhibit_ipv4=true", self.internal)
-        docker("network", "create", "-o", "com.docker.network.bridge.enable_icc=false", self.outside)
+        docker("network", "create", "--internal", "-o", "com.docker.network.bridge.inhibit_ipv4=true",
+               *self._task_label(), self.internal)
+        docker("network", "create", "-o", "com.docker.network.bridge.enable_icc=false", *self._task_label(),
+               self.outside)
         docker("create", "--name", self.gateway, "--network", self.outside, "--publish", "127.0.0.1::8082",
                *self._limits(256), "--mount", f"type=bind,src={gateway_config},dst=/run/gateway.json,readonly",
                "--entrypoint", "python3", self.image, "/opt/bananavibe/gateway.py", "/run/gateway.json")

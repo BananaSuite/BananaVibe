@@ -37,10 +37,20 @@ def host_allowed(host, patterns):
                               for pattern in patterns)
 
 
+# NAT64 prefixes embed an IPv4 address that Python still reports as global,
+# so 64:ff9b::a9fe:a9fe would reach 169.254.169.254 through a NAT64 gateway.
+NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
+
+
+def is_public(text):
+    address = ipaddress.ip_address(text.split("%")[0])
+    return address.is_global and not (address.version == 6 and any(address in net for net in NAT64))
+
+
 def public_address(host, port):
     """Resolve once and require every answer to be a public address."""
     results = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    if not results or any(not ipaddress.ip_address(row[4][0].split("%")[0]).is_global for row in results):
+    if not results or any(not is_public(row[4][0]) for row in results):
         raise ValueError("Only public network addresses are allowed.")
     return results[0]
 

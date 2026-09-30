@@ -3,7 +3,7 @@
 Each task is one JSON file written through the contents API with the file's
 previous blob SHA, so concurrent writers lose cleanly (compare-and-swap)
 instead of overwriting each other. The format is schema 1, unchanged from
-2.x, so tasks started by an older version continue after an upgrade.
+the preview release, so tasks started by it continue after an upgrade.
 """
 
 import base64
@@ -14,7 +14,7 @@ import re
 import tempfile
 import time
 
-from .forge import Conflict
+from .forge import TRANSIENT, Conflict, ForgeError, Unavailable
 from .gitutil import Git
 
 SCHEMA = 1
@@ -47,7 +47,7 @@ def new_task(config, number):
             "generation": 1, "branch": "", "base_sha": "", "checkpoint": "", "model": config.default_model,
             "status": "queued", "desired": "running", "request": 0, "operation": "continue", "runner": "",
             "lease_until": 0, "iterations": 0, "guidance": [], "events": [], "pr_url": "", "reason": "",
-            "phase": "", "approved": "", "status_comment": 0}
+            "phase": "", "approved": "", "status_comment": 0, "pushing": ""}
 
 
 def normalize(state):
@@ -56,7 +56,8 @@ def normalize(state):
         return None
     defaults = {"generation": 1, "branch": "", "base_sha": "", "checkpoint": "", "request": 0,
                 "operation": "continue", "runner": "", "lease_until": 0, "iterations": 0, "guidance": [],
-                "events": [], "pr_url": "", "reason": "", "phase": "", "approved": "", "status_comment": 0}
+                "events": [], "pr_url": "", "reason": "", "phase": "", "approved": "", "status_comment": 0,
+                "pushing": ""}
     for key, value in defaults.items():
         state.setdefault(key, copy.deepcopy(value))
     return state
@@ -97,7 +98,7 @@ class StateStore:
                              "to the control repository.")
 
     def make_orphan(self):
-        """Rewrite a 2.x state branch (a copy of the default branch) as an orphan.
+        """Rewrite a preview-release state branch (a copy of the default branch) as an orphan.
 
         Keeps every task record, drops the copied project files, and pushes
         with a lease so a concurrent state write makes it fail harmlessly.
@@ -144,7 +145,13 @@ class StateStore:
         return normalize(data), record["sha"]
 
     def mutate(self, number, change):
-        """Apply change(copy) with compare-and-swap; None or no-op leaves it untouched."""
+        """Apply change(copy) with compare-and-swap; None or no-op leaves it untouched.
+
+        A lost race is retried with the fresh record. So is a write the forge
+        failed transiently: if it did land after all, the retry re-reads it,
+        and every change function is safe to apply to its own result.
+        """
+        transient = 0
         for attempt in range(8):
             old, sha = self.read(number)
             new = change(copy.deepcopy(old))
@@ -160,6 +167,11 @@ class StateStore:
                 return new
             except Conflict:
                 self.sleep(min(0.2 * 2 ** attempt, 3))
+            except (ForgeError, Unavailable) as error:
+                if isinstance(error, ForgeError) and error.status not in TRANSIENT or transient >= 4:
+                    raise
+                transient += 1
+                self.sleep(2 ** transient)
         raise StateError("The task record kept changing; retry the command.")
 
     def claim(self, number, runner):

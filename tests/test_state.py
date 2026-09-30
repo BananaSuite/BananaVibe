@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from bananavibe.forge import ForgeError, Unavailable
 from bananavibe.state import LeaseLost, StateError, new_task, normalize, task_id
 from fakes import git
 
@@ -80,13 +81,13 @@ def test_record_for_another_issue_is_rejected(forge, store):
 
 
 def test_task_id_matches_2x_so_existing_records_and_branches_are_found():
-    # Value computed with the 2.x implementation; changing it would orphan every existing task.
+    # Value computed with the preview release; changing it would orphan every existing task.
     assert task_id("team/prompts", 3) == "05a87b2318842377"
 
 
 def test_2x_state_branch_is_converted_to_an_orphan_keeping_records(forge, store):
     main = forge.branch_sha("team/prompts", "main")
-    forge.create_branch("team/prompts", "bananavibe-state", main)  # how 2.x created it
+    forge.create_branch("team/prompts", "bananavibe-state", main)  # how the preview release created it
     store.mutate(3, lambda _: new_task(forge.config, 3))
     assert store.make_orphan() is True
     head = forge.branch_sha("team/prompts", "bananavibe-state")
@@ -104,3 +105,32 @@ def test_conversion_waits_for_running_tasks(forge, store):
     store.claim(3, "runner")
     with pytest.raises(StateError, match="running"):
         store.make_orphan()
+
+
+@pytest.mark.parametrize("error", [ForgeError(502, "save task state"), Unavailable("forge down")])
+def test_transient_write_failures_are_retried(forge, store, error):
+    store.ensure()
+    store.mutate(3, lambda _: new_task(forge.config, 3))
+    put, failures = forge.put_content, [error]
+
+    def flaky(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return put(*args, **kwargs)
+    forge.put_content = flaky
+    store.mutate(3, lambda state: {**state, "iterations": 7})
+    assert store.read(3)[0]["iterations"] == 7 and not failures
+
+
+def test_permanent_write_failures_are_not_retried(forge, store):
+    store.ensure()
+    store.mutate(3, lambda _: new_task(forge.config, 3))
+    calls = []
+
+    def refused(*args, **kwargs):
+        calls.append(args)
+        raise ForgeError(403, "save task state")
+    forge.put_content = refused
+    with pytest.raises(ForgeError):
+        store.mutate(3, lambda state: {**state, "iterations": 7})
+    assert len(calls) == 1

@@ -28,7 +28,7 @@ runner (controller)      holds BANANAVIBE_TOKEN, model keys, Git metadata
 
 ## What is checked before publishing
 
-- Changes to `forbidden_paths` (workflows, local actions, `.bananavibe.toml` by default), embedded Git repositories and files over 50 MiB are reverted, never committed.
+- Changes to `forbidden_paths` (workflows, local actions, `.bananavibe.toml` and `.gitmodules` by default), embedded Git repositories and files over 50 MiB are reverted, never committed.
 - Checks run on a clean export of the committed tree in a fresh container with a fresh `/state`. Nothing the agent changed in its own environment can influence them.
 - Each push uses a lease on the last known checkpoint, so BananaVibe never overwrites commits it did not make. It re-checks the branch before opening the PR.
 - The PR description is generated from the diff alone, in a request with no tools. Mentions and closing keywords (`Fixes #12`) are neutralized so opening or merging the PR cannot ping people or close unrelated issues.

@@ -1,8 +1,8 @@
 """Trusted configuration, read from the control repository's default branch.
 
-Every key accepted by BananaVibe 2.x keeps its meaning, so an existing
-`.bananavibe.toml` loads unchanged. Unknown keys produce warnings instead of
-errors, so an upgrade never stops a working installation; run
+Every key accepted by the BananaVibe preview release keeps its meaning, so an
+existing `.bananavibe.toml` loads unchanged. Unknown keys produce warnings
+instead of errors, so an upgrade never stops a working installation; run
 `bananavibe check-config` to see them.
 """
 
@@ -21,14 +21,14 @@ class ConfigurationError(ValueError):
 
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 FORGE_SECRETS = {"GITHUB_TOKEN", "FORGEJO_TOKEN", "GITEA_TOKEN", "BANANAVIBE_TOKEN"}
-LEGACY_IMAGES = {"bananavibe-sandbox:2.0.0"}
+LEGACY_IMAGES = {"bananavibe-sandbox:2.0.0"}  # the preview release's default image
 
 # The OpenCode provider package each adapter uses inside the sandbox.
 PACKAGES = {"openai": "@ai-sdk/openai", "openai-compatible": "@ai-sdk/openai-compatible",
             "anthropic": "@ai-sdk/anthropic", "google": "@ai-sdk/google", "azure": "@ai-sdk/azure"}
 
 DEFAULT_FORBIDDEN = (".github/workflows/", ".github/actions/", ".forgejo/workflows/", ".forgejo/actions/",
-                     ".gitea/workflows/", ".gitea/actions/", ".bananavibe.toml")
+                     ".gitea/workflows/", ".gitea/actions/", ".bananavibe.toml", ".gitmodules")
 # Untracked build and test caches that must never be committed as part of a
 # draft. Tracked files matching these patterns are still committed normally.
 DEFAULT_IGNORE = ("__pycache__/", "*.py[cod]", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
@@ -243,6 +243,10 @@ class Config:
             if type(value) is not int or not low <= value <= high:
                 raise ConfigurationError(f"limits.{name} must be a whole number from {low} to {high}.")
             limits[name] = value
+        if limits["poll_seconds"] * 3 > limits["lease_seconds"]:
+            # The heartbeat renews the lease once less than half is left, checking every poll.
+            raise ConfigurationError("limits.poll_seconds must be at most a third of limits.lease_seconds, "
+                                     "or the lease can expire between two heartbeats.")
 
         network = data.get("network", {})
         if not isinstance(network, dict) or set(network) - {"allow"}:
@@ -261,7 +265,7 @@ class Config:
         if not isinstance(image, str) or (image and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:@-]{0,250}", image)):
             raise ConfigurationError("image must be a container image reference.")
         if image in LEGACY_IMAGES:
-            warnings.append(f"image = \"{image}\" was the 2.x default; BananaVibe now builds its matching image.")
+            warnings.append(f"image = \"{image}\" was the preview release's default; BananaVibe now builds its matching image.")
             image = ""
 
         return cls(forge=forge, server_url=server, api_url=api, control_repository=control,

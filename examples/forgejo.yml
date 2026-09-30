@@ -30,7 +30,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
       # Pin to a reviewed release commit, or to a pinned mirror on your instance.
-      - uses: https://github.com/BananaSuite/BananaVibe@v3.0.0
+      - uses: https://github.com/BananaSuite/BananaVibe@v1.6.0
         env:
           BANANAVIBE_TOKEN: ${{ secrets.BANANAVIBE_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

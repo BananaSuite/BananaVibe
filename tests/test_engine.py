@@ -2,11 +2,15 @@
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import subprocess
+import tempfile
 import threading
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from bananavibe import __version__
+from bananavibe import engine as engine_module
 from bananavibe.config import Model
 from bananavibe.engine import Engine, EngineError, describe_error, image_tag
 from fakes import make_config
@@ -143,4 +147,24 @@ def test_error_descriptions():
 
 
 def test_image_tag_tracks_sandbox_sources():
-    assert image_tag().startswith("bananavibe-sandbox:3.")
+    assert image_tag().startswith(f"bananavibe-sandbox:{__version__}-")
+
+
+def test_leftovers_of_a_killed_run_of_the_same_task_are_removed(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_docker(*args, **_):
+        calls.append(args)
+        listed = {"ps": "c1\nc2\n", "network": "n1\n"}.get(args[0], "") if "--filter" in args else ""
+        return subprocess.CompletedProcess(args, 0, listed, "")
+    monkeypatch.setattr(engine_module, "docker", fake_docker)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    mine, other = tmp_path / "bananavibe-engine-0123456789abcdef-x1", tmp_path / "bananavibe-engine-fedcba9876543210-x2"
+    mine.mkdir(), other.mkdir()
+    engine_module.sweep("0123456789abcdef")
+    assert ("rm", "--force", "--volumes", "c1", "c2") in calls and ("network", "rm", "n1") in calls
+    assert all("label=org.bananavibe.task-id=0123456789abcdef" in call for call in calls if "--filter" in call)
+    assert not mine.exists() and other.exists()
+    calls.clear()
+    engine_module.sweep("*")
+    assert calls == [] and other.exists()

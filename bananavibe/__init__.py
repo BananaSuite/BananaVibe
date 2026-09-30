@@ -6,5 +6,5 @@ coding agent prepares a checked branch, and a person reviews the draft PR.
 Originally started by Luca Zani on 2026-08-13 as BananaAgent; see NOTICE.
 """
 
-__version__ = "3.0.0"
+__version__ = "1.6.0"
 USER_AGENT = f"BananaVibe/{__version__}"

@@ -9,7 +9,7 @@ We wrote it to keep [BananaWiki](https://github.com/BananaSuite/BananaWiki) and 
 ## How it works
 
 1. A maintainer starts a task. Only people with write access to both the issue repository and the target repository can use commands, and other comments never reach the agent.
-2. BananaVibe creates a `bananavibe/…` branch and starts OpenCode in a container that holds neither the forge token nor the real model key. The container reaches the model and the internet only through a per-task gateway, which enforces a model, a call budget and a host allowlist.
+2. BananaVibe creates a `bananavibe/…` branch and starts OpenCode in a container that holds neither the forge token nor the real model key. The container reaches the model and the internet only through a per-task gateway, which enforces a model, a call budget and, when you configure one with `[network] allow`, a host allowlist.
 3. After every agent turn, the working tree is committed and pushed. A stop or timeout saves the work so far; a hard crash can lose at most the turn in progress.
 4. When the agent says it is done, BananaVibe runs your checks itself, in a fresh container on a clean copy of the commit. Failures go back to the agent.
 5. When everything passes, a draft PR is opened. Its description is written from the diff alone, so issue text and guidance from a private repository are never given to it.
@@ -45,9 +45,9 @@ Commands must be the entire comment.
 
 Each run is bounded by `limits.max_minutes` and `limits.max_iterations`. When the agent needs a decision it asks on the issue and waits for `/banana answer`. See the [task lifecycle](docs/task-lifecycle.md).
 
-## Upgrading from 2.x
+## Upgrading from the preview release
 
-Change the Action reference to `@v3.0.0` (or its commit SHA). Configuration, task records, branches and backups are compatible, and running tasks continue. Then optionally run `bananavibe migrate-state` once. See [UPGRADING.md](UPGRADING.md), and the [review of 2.0](docs/review-2.0.md) for what changed and why.
+BananaVibe 1.6 is a rewrite of the preview release (commit `7dde06e`). Change the Action reference to `@v1.6.0` (or its commit SHA). Configuration, task records, branches and backups are compatible, and running tasks continue. Then optionally run `bananavibe migrate-state` once. See [UPGRADING.md](UPGRADING.md), and the [review of the preview release](docs/review-preview.md) for what changed and why.
 
 ## Documentation
 

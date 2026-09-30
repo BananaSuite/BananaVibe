@@ -50,7 +50,8 @@ def test_provider_authentication_and_parameters():
 
 
 @pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "172.17.0.1", "192.168.1.1",
-                                     "::1", "fc00::1", "0.0.0.0", "::ffff:127.0.0.1", "100.64.0.1"])
+                                     "::1", "fc00::1", "0.0.0.0", "::ffff:127.0.0.1", "100.64.0.1",
+                                     "64:ff9b::a9fe:a9fe", "64:ff9b::7f00:1", "64:ff9b:1::a00:1"])
 def test_private_destinations_are_refused(monkeypatch, address):
     monkeypatch.setattr(socket, "getaddrinfo", lambda *_, **__: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))])
     with pytest.raises(ValueError, match="public"):

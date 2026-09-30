@@ -2,12 +2,12 @@
 
     bananavibe [run] [--config FILE] [--event PATH --event-name NAME]
     bananavibe check-config [--config FILE]
-    bananavibe migrate-state [--config FILE]   (one-off 2.x upgrade step)
+    bananavibe migrate-state [--config FILE]   (one-off step after the preview release)
     bananavibe backups ...        (see docs/backups.md)
     bananavibe restore-state ...  (see docs/backups.md)
 
-`run` is the default and is what the Action invokes. The 2.x flag
-`--check-config` still works.
+`run` is the default and is what the Action invokes. The preview release's
+flag `--check-config` still works.
 """
 
 import argparse

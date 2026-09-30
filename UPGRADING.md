@@ -1,10 +1,12 @@
 # Upgrading
 
-## From 2.x to 3.0
+## From the preview release to 1.6
 
-3.0 is a drop-in replacement. Configuration files, task records, task
-branches, the state branch and backup archives are all compatible, and a task
-that is running when you upgrade continues under the new version.
+BananaVibe 1.6 is a rewrite of the preview release (commit `7dde06e`, which
+reported its version as 2.0.0). It is a drop-in replacement. Configuration
+files, task records, task branches, the state branch and backup archives are
+all compatible, and a task that is running when you upgrade continues under the
+new version.
 
 ### Required: one line
 
@@ -12,12 +14,12 @@ In `.github/workflows/bananavibe.yml` (or `.forgejo/workflows/…`), change the
 Action reference:
 
 ```yaml
-- uses: BananaSuite/BananaVibe@v3.0.0   # or the release commit SHA
+- uses: BananaSuite/BananaVibe@v1.6.0   # or the release commit SHA
 ```
 
 That's it. The first task after the upgrade builds the new sandbox image
-(3–5 minutes on a fresh runner). If your configuration pinned the old default
-`image = "bananavibe-sandbox:2.0.0"`, it is ignored with a warning and the
+(3–5 minutes on a fresh runner). If your configuration pinned the preview release's
+default `image = "bananavibe-sandbox:2.0.0"`, it is ignored with a warning and the
 matching image is built instead.
 
 ### Recommended
@@ -28,7 +30,7 @@ matching image is built instead.
 4. Convert the state branch to an orphan so state writes stop triggering your push workflows. With no tasks running:
 
    ```sh
-   git clone https://github.com/BananaSuite/BananaVibe && cd BananaVibe && git checkout v3.0.0
+   git clone https://github.com/BananaSuite/BananaVibe && cd BananaVibe && git checkout v1.6.0
    BANANAVIBE_TOKEN=… GITHUB_REPOSITORY=owner/control-repo \
      python3 -m bananavibe migrate-state --config /path/to/.bananavibe.toml
    ```
@@ -49,4 +51,4 @@ matching image is built instead.
 
 ### Rolling back
 
-Point the workflow back at the 2.x commit. Records written by 3.0 contain a few extra fields, which 2.x ignores. An orphaned state branch also works with 2.x.
+Point the workflow back at the preview commit (`7dde06e`). Records written by 1.6 contain a few extra fields, which the preview release ignores. An orphaned state branch also works with it.

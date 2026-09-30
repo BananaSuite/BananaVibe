@@ -19,6 +19,21 @@ class Conflict(ForgeError):
     """The resource changed or already exists (optimistic write lost)."""
 
 
+class Unavailable(RuntimeError):
+    """The forge API could not be reached; the request may be retried."""
+
+
+# Statuses after which a write may be retried: the request never took effect,
+# or it did and a compare-and-swap retry notices.
+TRANSIENT = {429, 500, 502, 503, 504}
+
+
+def _rate_limited(error):
+    """GitHub reports secondary rate limits as 403 with Retry-After or no remaining quota."""
+    headers = {key.lower(): value for key, value in error.headers.items()}
+    return error.status == 403 and ("retry-after" in headers or headers.get("x-ratelimit-remaining") == "0")
+
+
 class Forge:
     def __init__(self, config, token, *, transport=httpclient.request):
         if not token:
@@ -61,12 +76,14 @@ class Forge:
         except httpclient.HTTPError as error:
             if error.status == 404 and missing:
                 return None
-            raise (Conflict if error.status in conflict else ForgeError)(error.status, what) from None
+            status = 429 if _rate_limited(error) else error.status
+            raise (Conflict if status in conflict else ForgeError)(status, what) from None
         except httpclient.Unreachable as error:
-            raise RuntimeError(f"The forge API could not be reached: {error}") from None
+            raise Unavailable(f"The forge API could not be reached: {error}") from None
         return response.json()
 
-    def pages(self, path, params=None, *, maximum=50, what="list items"):
+    def pages(self, path, params=None, *, maximum=50, what="list items", complete=True):
+        """Every item of a list; with complete=False, the first `maximum` pages are enough."""
         items = []
         for page in range(1, maximum + 1):
             data = self.call("GET", path, params={**(params or {}), "page": page,
@@ -76,6 +93,8 @@ class Forge:
             items.extend(data)
             if len(data) < 50:
                 return items
+        if not complete:
+            return items
         raise RuntimeError(f"More than {maximum * 50} results; archive old items first.")
 
     # Repositories and permissions
@@ -164,8 +183,10 @@ class Forge:
                              f"{quote(branch, safe='/')}", missing=True, what="find the pull request")
             if pull:
                 return pull
+            # Older Forgejo versions lack the lookup above. A task's pull request
+            # is recently updated, so the newest pages are enough to find it.
             pulls = self.pages(f"/repos/{repository}/pulls", {"state": "all", "sort": "recentupdate"},
-                               maximum=10, what="list pull requests")
+                               maximum=10, what="list pull requests", complete=False)
         matches = [pull for pull in pulls or [] if (pull.get("head") or {}).get("ref") == branch]
         return max(matches, key=lambda pull: pull.get("number", 0)) if matches else None
 

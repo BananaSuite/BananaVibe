@@ -126,3 +126,12 @@ def test_invalid_records_block_the_export(fixture, tmp_path):
 def test_state_store_listing_is_used(fixture):
     forge = fixture[0]
     assert [state["issue"] for state in StateStore(forge).all()] == [3]
+
+
+def test_backups_use_the_workflow_repository(tmp_path, monkeypatch):
+    configuration = tmp_path / "config.toml"
+    configuration.write_text('checks = [["make", "test"]]\n'
+                             '[models.coding]\nprovider = "openai"\nendpoint = "https://m.example/v1"\nmodel = "m"\n')
+    monkeypatch.delenv("FORGEJO_REPOSITORY", raising=False)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "team/prompts")
+    assert backups._load(configuration).control_repository == "team/prompts"

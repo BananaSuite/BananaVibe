@@ -15,16 +15,16 @@ A status comment on the issue is edited as the run progresses. Each run ends wit
 
 | State | Meaning | What you can do |
 | --- | --- | --- |
-| queued | Recorded; a runner will pick it up. | Wait. |
+| queued | Recorded; a runner will pick it up. | Wait. If no job ever started, `start` again. |
 | running | A runner holds the lease. | `stop`, `answer`, `model`, `status`. |
 | blocked | The agent asked a question, completion had no changes, or the issue text changed after approval. | `answer TEXT`, or `resume` to approve edited text. |
 | paused | Time or iteration allowance used up, or the run was cancelled. | `resume`. |
-| interrupted | The runner vanished without finishing (found by the watchdog or `status`). | Check the job log, then `resume`. |
+| interrupted | The runner vanished without finishing (found by the watchdog or `status`). | Check the job log, then `resume`. `start` also restarts a task whose runner vanished. |
 | stopped | A maintainer stopped it. | `resume` or `restart`. |
 | failed | An error, such as a model key, a preparation command or a moved branch, or `/banana fail`. | Fix the cause, then `resume` or `restart`. |
 | complete | Checks passed and a draft PR is open. | Review and merge or close it, or `answer` to revise. |
 
-Work is saved on the task branch in every state. `resume` always continues from the last checkpoint. `restart` starts a new generation from the base branch and keeps the old branch.
+Work is saved on the task branch in every state. `resume` always continues from the last checkpoint. `restart` starts a new generation from the base branch and keeps the old branch; it also picks up a target repository or base branch changed in the configuration.
 
 ## Changing a running task
 

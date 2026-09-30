@@ -1,15 +1,18 @@
 # Changelog
 
-## 3.0.0
+## 1.6.0
 
-A rewrite for production use and open-source release. Configuration, state and
-backups are compatible with 2.x; see [UPGRADING.md](UPGRADING.md). The review
-that motivated each change is in [docs/review-2.0.md](docs/review-2.0.md).
+A rewrite of the preview release for production use and open-source release.
+Configuration, state and backups are compatible with the preview release; see
+[UPGRADING.md](UPGRADING.md). The review that motivated each change is in
+[docs/review-preview.md](docs/review-preview.md).
 
 ### Security
 - Issue text is fingerprinted when a maintainer approves it. An edit afterwards blocks the task until it is re-approved.
 - Acceptance checks run in a fresh container on a clean export of the committed tree, out of the agent's reach.
 - `[network] allow` restricts the sandbox's internet access to listed hosts.
+- The egress proxy refuses NAT64 addresses, which could otherwise reach private and metadata addresses.
+- `.gitmodules` is protected by default.
 - PR text cannot mention people or auto-close issues.
 - Local composite actions (`.github/actions/`, `.forgejo/actions/`) are protected by default.
 - Each task's gateway gets its own isolated bridge network.
@@ -24,6 +27,17 @@ that motivated each change is in [docs/review-2.0.md](docs/review-2.0.md).
 - Pushes are leased against the last checkpoint and never overwrite outside commits.
 - Draft PRs fall back gracefully where drafts are unavailable.
 - Heartbeat and worker threads share state safely.
+- A checkpoint is recorded before it is pushed, so a run killed between the push and the record resumes instead of failing with "commits BananaVibe did not make".
+- `/banana restart` works after the target repository or base branch changed in the configuration.
+- `/banana start` restarts a queued or running task whose runner vanished, instead of being ignored.
+- A stop or fail sent while the PR description is written wins over publication, and one sent after it is no longer overwritten when the run ends.
+- Guidance sent while the PR description is written is applied before the PR opens.
+- Unexpected errors and Git or Docker timeouts still save the work, release the task and report on the issue.
+- State writes are retried after transient forge errors, including GitHub's secondary rate limits.
+- Finding a task's PR on Forgejo no longer fails in repositories with more than 500 pull requests.
+- A new run removes containers, networks and key files left by a hard-killed run of the same task.
+- `limits.poll_seconds` must be at most a third of `limits.lease_seconds`, so the lease cannot lapse between heartbeats.
+- Backups use the workflow's repository as the control repository, like the main command.
 
 ### Features
 - `/banana answer` on a finished task revises the same branch and PR.
@@ -40,6 +54,7 @@ that motivated each change is in [docs/review-2.0.md](docs/review-2.0.md).
 - Provider errors reach OpenCode and the logs, with keys redacted.
 - A test suite built on real Git, plus a Docker end-to-end test in CI.
 
-## 2.0.0
+## Preview release
 
-First public release (September 2026).
+First public release (September 2026, commit `7dde06e`). It reported its
+version as 2.0.0.

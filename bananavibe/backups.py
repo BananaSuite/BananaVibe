@@ -3,10 +3,10 @@
 A package holds the trusted configuration, the task records, the issue
 transcripts of those tasks, a bundle of the control repository's default and
 state branches, and a bundle of the task branches (pinned to each unfinished
-task's recorded checkpoint). The format is unchanged from 2.x, so older
-snapshots restore with this version and vice versa. Encryption, upload and
-retention live in `banana_backup`, which is shared with BananaWiki and
-BananaChat and must not diverge (see scripts/sync_backups.py).
+task's recorded checkpoint). The format is unchanged from the preview
+release, so older snapshots restore with this version and vice versa.
+Encryption, upload and retention live in `banana_backup`, which is shared with
+BananaWiki and BananaChat and must not diverge (see scripts/sync_backups.py).
 """
 
 import argparse
@@ -238,6 +238,15 @@ def restore_state(forge, recovery, confirm_repository, *, git_factory=Git, clock
     return {"outcome": "state restored", "issues": restored, "tasks_started": 0}
 
 
+def _load(path):
+    """Like the main command: inside a workflow, its own repository is the control repository."""
+    return Config.load(path, control_repository=workflow_repository())
+
+
+def workflow_repository():
+    return os.environ.get("GITHUB_REPOSITORY") or os.environ.get("FORGEJO_REPOSITORY") or None
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="bananavibe", description="Encrypted backups of BananaVibe data.")
     command = add_commands(parser.add_subparsers(dest="command", required=True), agent=True)
@@ -248,7 +257,7 @@ def main(argv):
     store = Store(args.root, "BananaVibe")
     try:
         def create():
-            forge = Forge(Config.load(args.config), os.environ.get("BANANAVIBE_TOKEN", ""))
+            forge = Forge(_load(args.config), os.environ.get("BANANAVIBE_TOKEN", ""))
             return export_package(forge, args.config, store.root / f"bananavibe-{time.time_ns()}.tar.gz",
                                   maximum=store.settings()["max_mib"])
         result = handle(args, store, create_package=create,
@@ -268,7 +277,7 @@ def replay_main(argv):
     parser.add_argument("--confirm-repository", required=True)
     args = parser.parse_args(argv)
     try:
-        forge = Forge(Config.load(args.config), os.environ.get("BANANAVIBE_TOKEN", ""))
+        forge = Forge(_load(args.config), os.environ.get("BANANAVIBE_TOKEN", ""))
         print(json.dumps(restore_state(forge, args.directory, args.confirm_repository), indent=2))
         return 0
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:

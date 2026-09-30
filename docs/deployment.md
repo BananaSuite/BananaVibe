@@ -28,7 +28,7 @@ Add one secret per `api_key_env` in the configuration, and pass each in the work
 ## GitHub Actions
 
 1. Copy [`examples/github.yml`](../examples/github.yml) to `.github/workflows/bananavibe.yml` in the control repository.
-2. Pin the Action to a reviewed release, preferably by commit SHA (`BananaSuite/BananaVibe@<sha> # v3.0.0`).
+2. Pin the Action to a reviewed release, preferably by commit SHA (`BananaSuite/BananaVibe@<sha> # v1.6.0`).
 3. Add `.bananavibe.toml` and the secrets, and commit to the default branch.
 
 Hosted `ubuntu-latest` runners have everything needed: Python 3.11+, Git and Docker. The first task on a fresh runner builds the sandbox image, which takes about 3–5 minutes and isn't counted in `max_minutes`. To skip the build, set `image` to the digest published with each release.
@@ -50,7 +50,7 @@ Don't add a workflow `concurrency` group that cancels runs: a stop command must 
 
 ## Operations
 
-The scheduled trigger is a watchdog: it marks tasks whose runner vanished (a lost runner or a hard timeout) as interrupted. It reads all task records with one Git fetch, and hourly is enough because any command on an issue also checks that issue's task.
+The scheduled trigger is a watchdog: it marks tasks whose runner vanished (a lost runner or a hard timeout) as interrupted. It reads all task records with one Git fetch, and hourly is enough because `/banana status` checks that issue's task at once, and `/banana start` or `resume` restarts a task whose runner vanished.
 
 Every decision is logged in the job, and the Action sets `outcome` and `issue` outputs. Only a failed task fails the job; blocked and paused tasks are waiting for a person, not errors.
 

@@ -72,11 +72,16 @@ class Workspace:
                        control_dir=self.root / "control")
         self.remote_sha = None
 
-    def prepare(self, expected_sha):
-        """Check out the task branch and confirm it is the recorded checkpoint."""
+    def prepare(self, expected_sha, pushing=""):
+        """Check out the task branch and confirm it is the recorded checkpoint.
+
+        `pushing` is a commit BananaVibe recorded just before pushing it; if
+        the run ended before it could record the push, the branch is there.
+        Returns the branch head.
+        """
         self.git.fetch(self.url, f"refs/heads/{self.branch}")
         head = self.git.out("rev-parse", "FETCH_HEAD")
-        if expected_sha and head != expected_sha:
+        if expected_sha and head not in {expected_sha, pushing or expected_sha}:
             raise BranchMoved(f"The task branch `{self.branch}` has commits BananaVibe did not make "
                               f"(expected `{expected_sha[:12]}`, found `{head[:12]}`). Review them, then "
                               "use `/banana restart`, or reset the branch to the checkpoint and resume.")
@@ -87,6 +92,7 @@ class Workspace:
         exclude.write_text("\n".join((f"/{REPORT_DIR}/", *self.config.ignore)) + "\n")
         (self.path / REPORT_DIR).mkdir(exist_ok=True)
         give_to_sandbox(self.path)
+        return head
 
     def head(self):
         return self.git.out("rev-parse", "HEAD")

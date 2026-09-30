@@ -10,15 +10,17 @@ import json
 import secrets
 import shutil
 import signal
+import subprocess
 import tempfile
 import threading
 import time
+import traceback
 
 from . import summary
 from .engine import Engine, EngineError, ensure_image
 from .forge import Conflict, ForgeError
 from .gitutil import GitError
-from .state import TASK_BRANCH, LeaseLost, StateError, issue_digest
+from .state import TASK_BRANCH, LeaseLost, StateError, issue_digest, task_id
 from .workspace import BranchMoved, Workspace, clear_report, read_report
 
 INSTRUCTIONS = """You are preparing a change that a maintainer will review as a draft pull request.
@@ -74,6 +76,7 @@ class TaskRunner:
         self.deadline = None
         self.started = clock()
         self.seen_request = None
+        self.claimed_request = None
         self.model_alias = None
         self.guidance_seen = 0
         self.notes = []
@@ -185,6 +188,7 @@ class TaskRunner:
         if not self.state:
             self.log(f"Issue #{self.number} is not runnable or another runner holds it.")
             return "busy"
+        self.claimed_request = self.state["request"]
         self.log(f"Issue #{self.number}: runner {self.runner[:8]} claimed the task.")
         self._progress()
         worker = threading.Thread(target=self._heartbeat, name="bananavibe-heartbeat", daemon=True)
@@ -201,6 +205,14 @@ class TaskRunner:
             outcome, reason = "lost", str(error)
         except EXPECTED as error:
             outcome, reason = "failed", str(error) or type(error).__name__
+        except subprocess.TimeoutExpired as error:
+            program = error.cmd[0] if isinstance(error.cmd, (list, tuple)) else str(error.cmd).split(" ")[0]
+            outcome, reason = "failed", f"`{program}` did not finish within {error.timeout:.0f} seconds."
+        except Exception as error:
+            # Still save, release and report: a task must never stay leased silently.
+            self.log(traceback.format_exc())
+            outcome, reason = "failed", (f"BananaVibe hit an unexpected error ({type(error).__name__}). "
+                                         "The workflow log has the details.")
         finally:
             self.stopping.set()
             worker.join(timeout=60)
@@ -217,7 +229,10 @@ class TaskRunner:
             with tempfile.TemporaryDirectory(prefix="bananavibe-task-") as root:
                 workspace = self.workspace_factory(root, self.forge, state["branch"])
                 self.pulse("Restoring the task branch")
-                workspace.prepare(state["checkpoint"])
+                head = workspace.prepare(state["checkpoint"], state["pushing"])
+                if state["pushing"]:
+                    # The previous run ended mid-push: adopt the push if it landed.
+                    state = self._update(checkpoint=head, pushing="")
                 try:
                     outcome, reason = self._work(workspace, image)
                 except Redirected as change:
@@ -226,7 +241,7 @@ class TaskRunner:
                     continue
                 except LeaseLost:
                     raise  # another runner owns the branch now; do not push to it
-                except (Interrupted, *EXPECTED):
+                except Exception:
                     self._save(workspace)
                     raise
             if outcome != "complete" and self._more_requested():
@@ -245,8 +260,9 @@ class TaskRunner:
             raise TaskError(f"The model alias `{state['model']}` is no longer configured. "
                             "Choose one with `/banana models` and `/banana model ALIAS`.")
         self.config.models[state["model"]].api_key()
-        if (state["target_repository"] != self.config.target_repository
-                or state["base_branch"] != self.config.base_branch):
+        restart = state["operation"] == "restart"
+        if not restart and (state["target_repository"] != self.config.target_repository
+                            or state["base_branch"] != self.config.base_branch):
             raise TaskError("The target repository or base branch changed since this task started. "
                             "Use `/banana restart` to start over against the new target.")
         issue = self.forge.issue(self.number)
@@ -258,9 +274,10 @@ class TaskRunner:
                                          "Review the edit, then use `/banana resume` to approve the current text.")
         self.issue = issue
         changes = {"approved": digest}
-        if state["operation"] == "restart":
-            changes.update(generation=state["generation"] + 1, branch="", base_sha="", checkpoint="",
-                           iterations=0, pr_url="")
+        if restart:
+            changes.update(generation=state["generation"] + 1, branch="", base_sha="", checkpoint="", pushing="",
+                           iterations=0, pr_url="", target_repository=self.config.target_repository,
+                           base_branch=self.config.base_branch)
         elif state["operation"] == "revise" and state["pr_url"] and state["branch"]:
             pull = self.forge.find_pull(state["branch"])
             if pull and not self.forge.pull_open(pull):
@@ -313,7 +330,8 @@ class TaskRunner:
         state = self.state
         model = self.config.models[state["model"]]
         prompt = self._prompt()
-        with self.engine_factory(self.config, model, workspace.path, self.pulse, image=image) as engine:
+        with self.engine_factory(self.config, model, workspace.path, self.pulse, image=image,
+                                 task=task_id(self.config.control_repository, self.number)) as engine:
             engine.prepare()
             for _ in range(self.config.limits.max_iterations):
                 try:
@@ -366,23 +384,32 @@ class TaskRunner:
         return ("These changes were discarded because BananaVibe may not commit them. A maintainer must make "
                 "such changes; adapt the work without them:\n" + listed)
 
+    def _push(self, workspace):
+        """Push the committed work and record it as the checkpoint.
+
+        The commit is recorded as `pushing` first, so a run that ends between
+        the push and the second record leaves a branch the next run accepts.
+        """
+        head = workspace.head()
+        if head == self.state["checkpoint"]:
+            return
+        self._update(pushing=head)
+        workspace.push()
+        self._update(checkpoint=head, pushing="")
+
     def _checkpoint(self, workspace, engine):
         self.pulse("Saving a checkpoint")
         with engine.paused():
             rejected = workspace.snapshot()
-        sha = workspace.push()
-        if sha != self.state["checkpoint"]:
-            self._update(checkpoint=sha)
+        self._push(workspace)
         return rejected
 
     def _save(self, workspace):
         """Best-effort final checkpoint after the engine has stopped."""
         try:
             workspace.snapshot()
-            sha = workspace.push()
-            if sha != self.state["checkpoint"]:
-                self._update(checkpoint=sha)
-        except (GitError, BranchMoved, StateError, ForgeError, ValueError, OSError, RuntimeError) as error:
+            self._push(workspace)
+        except Exception as error:  # never hide why the run ended
             self.log(f"The final checkpoint could not be saved: {error}")
 
     def _validate(self, workspace, engine):
@@ -407,6 +434,8 @@ class TaskRunner:
             raise BranchMoved("The task branch changed after the checks passed. Review it, then resume.")
         files = workspace.changed_files(base)
         title, body, _ = self.describe_pull(model, self.config.target_repository, workspace.diff(base), files)
+        self._fresh()
+        self.pulse("Opening the pull request")  # a stop or new guidance sent meanwhile wins
         checks = "\n".join(f"- `{' '.join(command)}`" for command in self.config.checks)
         body += (f"\n\n---\n**Checks:** on a clean checkout of `{head[:12]}`, `git diff --check` and every "
                  f"configured check passed:\n{checks}\n\n_Drafted with BananaVibe. A maintainer must review "
@@ -421,35 +450,55 @@ class TaskRunner:
         if outcome == "lost":
             self.log(f"Issue #{self.number}: {reason}")
             return outcome
-        try:
-            state, _ = self.store.read(self.number)
-        except (StateError, ForgeError, RuntimeError) as error:
-            self.log(f"Could not read the task record to finish: {error}")
-            return outcome
-        if not state or state["runner"] != self.runner:
-            return outcome
-        self.state = state
-        self.log(f"Issue #{self.number}: {outcome}. {reason}")
-        late = state["desired"] == "running" and state["request"] != self.seen_request
-        note = " New instructions arrived as this run ended; use `/banana resume` to apply them." if late else ""
+        seen = self.claimed_request if self.seen_request is None else self.seen_request
+        final = {}
+
+        def release(state):
+            # Decided on the current record inside the compare-and-swap, so a
+            # command recorded while this run was ending is never overwritten.
+            final.clear()
+            if not state or state["runner"] != self.runner:
+                return None
+            result, text = outcome, reason
+            requested = state["desired"] if state["desired"] in {"stopped", "failed"} else ""
+            if requested and result not in {"stopped", "failed"}:
+                text = state["reason"] or "A maintainer stopped the task."
+                if result == "complete":
+                    text += f"\n\nThe draft pull request had already been opened: {reason}"
+                result = requested
+            late = state["desired"] == "running" and state["request"] != seen
+            note = " New instructions arrived as this run ended; use `/banana resume` to apply them." if late else ""
+            if result == "complete":
+                state.update(status="complete", desired="complete", phase="Ready for review", reason=note.strip())
+            else:
+                text += note
+                state.update(status=result, desired=result, reason=text[:4000], phase="")
+            state.update(runner="", lease_until=0)
+            final.update(outcome=result, reason=text, note=note, branch=state["branch"])
+            return state
+
         # Release first: a failed comment must never leave the task leased.
+        try:
+            state = self.store.mutate(self.number, release)
+        except (StateError, ForgeError, RuntimeError) as error:
+            self.log(f"Could not release the task record: {error}")
+            return outcome
+        if not final:
+            return outcome  # another runner holds the task now
+        self.state = state
+        outcome, reason, note = final["outcome"], final["reason"], final["note"]
+        self.log(f"Issue #{self.number}: {outcome}. {reason}")
         if outcome == "complete":
-            self.store.release(self.number, self.runner, status="complete", desired="complete",
-                               phase="Ready for review", reason=note.strip())
             checks = len(self.config.checks)
             text = (f"The draft pull request is ready for review: {reason}\n\n`git diff --check` and all {checks} "
                     f"configured check{'s' if checks != 1 else ''} passed on a clean checkout. Review, then merge "
                     "or close it. To revise it, reopen this issue with `/banana answer TEXT`." + note)
+        elif outcome == "blocked":
+            text = f"**Guidance needed.**\n\n> {reason[:4000]}\n\nReply with `/banana answer TEXT` to continue."
         else:
-            reason += note
-            self.store.release(self.number, self.runner, status=outcome, desired=outcome, reason=reason[:4000],
-                               phase="")
-            if outcome == "blocked":
-                text = f"**Guidance needed.**\n\n> {reason[:4000]}\n\nReply with `/banana answer TEXT` to continue."
-            else:
-                text = (f"Task **{outcome}**. {reason[:4000]}\n\nThe work so far is saved on "
-                        f"`{state['branch'] or '(none)'}`. Use `/banana resume` to continue, `/banana answer TEXT` "
-                        "to add guidance, or `/banana restart` to start over.")
+            text = (f"Task **{outcome}**. {reason[:4000]}\n\nThe work so far is saved on "
+                    f"`{final['branch'] or '(none)'}`. Use `/banana resume` to continue, `/banana answer TEXT` "
+                    "to add guidance, or `/banana restart` to start over.")
         self._progress(final=outcome)
         try:
             self.forge.comment(self.number, text)

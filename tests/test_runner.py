@@ -1,8 +1,10 @@
 """Task lifecycle with real Git, the fake forge and a scriptable engine."""
 
 from contextlib import contextmanager
+from dataclasses import replace
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -10,6 +12,7 @@ from bananavibe.commands import Command
 from bananavibe.controller import Controller
 from bananavibe.engine import EngineError
 from bananavibe.runner import TaskRunner
+from fakes import git
 
 
 class FakeEngine:
@@ -20,7 +23,7 @@ class FakeEngine:
     check_failures = []
     on_check = None
 
-    def __init__(self, config, model, workspace, pulse, *, image):
+    def __init__(self, config, model, workspace, pulse, *, image, task=""):
         self.config, self.model, self.path, self.pulse = config, model, Path(workspace), pulse
         type(self).sessions += 1
 
@@ -270,7 +273,6 @@ def test_branch_changed_outside_bananavibe_is_not_overwritten(forge, store, cont
     run(forge, store)
     state = store.read(3)[0]
     forge.create_branch("team/app", "scratch", state["checkpoint"])
-    from fakes import git
     work = tmp_path / "outside"
     git("clone", "-q", "-b", state["branch"], str(forge.target), str(work))
     (work / "app.py").write_text("answer = 42\n")
@@ -383,11 +385,117 @@ def test_finishing_releases_the_task_even_if_the_forge_fails(forge, store, contr
     assert state["status"] == "complete" and not state["runner"]
 
 
-def test_guidance_arriving_while_publishing_is_reported(forge, store, controller):
+def test_guidance_arriving_while_describing_is_applied_before_publishing(forge, store, controller):
     def late_summary(model, repository, diff, files):
         controller.command(3, Command("answer", "One more thing"), "maintainer", "during-publish")
         return summary(model, repository, diff, files)
     runner = TaskRunner(forge, store, 3, engine_factory=FakeEngine, image_factory=lambda *_: "image",
                         describe_pull=late_summary, log=lambda *_: None)
     assert runner.run() == "complete"
+    assert "One more thing" in FakeEngine.prompts[1] and len(forge.pulls) == 1
+    assert "/banana resume" not in forge.posts[-1]
+
+
+def test_guidance_arriving_after_publication_is_reported(forge, store, controller):
+    publish = forge.publish_pull
+
+    def late_publish(*args):
+        pull = publish(*args)
+        controller.command(3, Command("answer", "One more thing"), "maintainer", "after-publish")
+        return pull
+    forge.publish_pull = late_publish
+    assert run(forge, store) == "complete"
     assert "/banana resume" in forge.posts[-1]
+    assert store.read(3)[0]["guidance"][-1]["text"] == "One more thing"
+
+
+def test_stop_while_describing_prevents_publication(forge, store, controller):
+    def late_summary(model, repository, diff, files):
+        controller.command(3, Command("stop"), "maintainer", "stop-during-publish")
+        return summary(model, repository, diff, files)
+    runner = TaskRunner(forge, store, 3, engine_factory=FakeEngine, image_factory=lambda *_: "image",
+                        describe_pull=late_summary, log=lambda *_: None)
+    assert runner.run() == "stopped"
+    assert not forge.pulls and store.read(3)[0]["status"] == "stopped"
+
+
+def test_fail_recorded_after_publication_is_kept(forge, store, controller):
+    publish = forge.publish_pull
+
+    def late_publish(*args):
+        pull = publish(*args)
+        controller.command(3, Command("fail", "Wrong approach"), "maintainer", "fail-after-publish")
+        return pull
+    forge.publish_pull = late_publish
+    assert run(forge, store) == "failed"
+    state = store.read(3)[0]
+    assert state["status"] == state["desired"] == "failed" and not state["runner"]
+    assert "Wrong approach" in state["reason"] and state["pr_url"] in state["reason"]
+    assert forge.issue_state.get(3) is None  # not closed as complete
+
+
+def test_restart_adopts_a_changed_target(forge, store, controller):
+    FakeEngine.script = lambda engine, text: report(engine, status="blocked", question="?")
+    assert run(forge, store) == "blocked"
+    forge.config = replace(forge.config, target_repository="team/app2", base_branch="main")
+    controller.command(3, Command("resume"), "maintainer", "resume-1")
+    assert run(forge, store) == "failed"
+    assert "/banana restart" in forge.posts[-1]
+    controller.command(3, Command("restart"), "maintainer", "restart-1")
+    FakeEngine.script = None
+    assert run(forge, store) == "complete"
+    state = store.read(3)[0]
+    assert state["target_repository"] == "team/app2" and state["branch"].endswith("-2")
+
+
+def test_a_push_the_run_could_not_record_is_resumed(forge, store, controller, tmp_path):
+    """The job was killed after pushing a checkpoint but before recording it."""
+    FakeEngine.script = lambda engine, text: report(engine, status="blocked", question="?")
+    run(forge, store)
+    state = store.read(3)[0]
+    work = tmp_path / "killed-run"
+    git("clone", "-q", "-b", state["branch"], str(forge.target), str(work))
+    (work / "app.py").write_text("answer = 2\n")
+    git("commit", "-qam", "Checkpoint maintenance draft", cwd=work)
+    git("push", "-q", "origin", state["branch"], cwd=work)
+    pushed = git("rev-parse", "HEAD", cwd=work)
+    store.mutate(3, lambda record: {**record, "pushing": pushed})
+    controller.command(3, Command("resume"), "maintainer", "resume-1")
+    FakeEngine.script = lambda engine, text: report(engine, status="complete")  # the change is already there
+    assert run(forge, store) == "complete"
+    state = store.read(3)[0]
+    assert not state["pushing"] and forge.show(state["branch"], "app.py") == "answer = 2"
+
+
+def test_checkpoints_record_the_push_before_making_it(forge, store, controller):
+    writes = []
+    owned = store.owned
+
+    def spy(number, runner, **changes):
+        writes.append(sorted(changes))
+        return owned(number, runner, **changes)
+    store.owned = spy
+    assert run(forge, store) == "complete"
+    assert writes.index(["pushing"]) < writes.index(["checkpoint", "pushing"])
+
+
+@pytest.mark.parametrize("error,expected", [
+    (KeyError("status"), "unexpected error (KeyError)"),
+    (subprocess.TimeoutExpired(["git", "push"], 600), "`git` did not finish within 600 seconds"),
+])
+def test_unexpected_errors_save_work_and_release_the_task(forge, store, controller, error, expected):
+    def script(engine, text):
+        (engine.path / "app.py").write_text("answer = 2\n")
+        raise error
+    FakeEngine.script = script
+    assert run(forge, store) == "failed"
+    state = store.read(3)[0]
+    assert not state["runner"] and state["status"] == "failed" and expected in state["reason"]
+    assert forge.show(state["branch"], "app.py") == "answer = 2"
+    assert expected in forge.posts[-1]
+
+
+def test_a_run_that_fails_early_does_not_claim_new_instructions(forge, store, controller):
+    store.mutate(3, lambda record: {**record, "model": "removed"})
+    assert run(forge, store) == "failed"
+    assert "no longer configured" in forge.posts[-1] and "New instructions" not in forge.posts[-1]

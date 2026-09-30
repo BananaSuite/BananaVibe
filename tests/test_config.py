@@ -19,7 +19,7 @@ def test_examples_load(name):
     assert config.target_repository.startswith("BananaSuite/") and not config.warnings
 
 
-def test_2x_configuration_loads_unchanged(tmp_path):
+def test_preview_configuration_loads_unchanged(tmp_path):
     legacy = tmp_path / "legacy.toml"
     legacy.write_text("""
 forge = "forgejo"
@@ -56,7 +56,7 @@ max_workspace_mb = 512
     assert config.image == ""  # the old default tag is replaced by the matching build
     assert config.forbidden_paths == (".github/workflows/", ".bananavibe.toml")
     assert config.limits.max_minutes == 45 and config.egress == ("*",)
-    assert any("2.x default" in warning for warning in config.warnings)
+    assert any("preview release's default" in warning for warning in config.warnings)
 
 
 def test_workflow_repository_overrides_the_file():
@@ -122,3 +122,13 @@ def test_missing_model_secret_is_reported(monkeypatch):
         model.api_key()
     monkeypatch.setenv("MODEL_KEY", "k")
     assert model.api_key() == "k"
+
+
+def test_poll_interval_must_fit_the_lease():
+    assert parse(limits={"poll_seconds": 20, "lease_seconds": 60}).limits.poll_seconds == 20
+    with pytest.raises(ConfigurationError, match="third of limits.lease_seconds"):
+        parse(limits={"poll_seconds": 60, "lease_seconds": 60})
+
+
+def test_gitmodules_is_protected_by_default():
+    assert ".gitmodules" in parse().forbidden_paths

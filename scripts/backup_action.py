@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from banana_backup.files import atomic_write
 from banana_backup.store import Store
-from bananavibe.backups import export_package
+from bananavibe.backups import export_package, workflow_repository
 from bananavibe.config import Config
 from bananavibe.forge import Forge
 
@@ -33,7 +33,8 @@ def main():
         store.configure(repo=os.environ["BACKUP_REPO"], forge=os.environ["BACKUP_FORGE"], name=os.environ["BACKUP_NAME"],
                         username=os.environ.get("BACKUP_USERNAME", "git") or "git", token_file=token, key_file=identity,
                         keep=int(os.environ.get("BACKUP_KEEP", "7") or "7"), max_mib=int(os.environ.get("BACKUP_MAX_MIB", "512") or "512"))
-        forge = Forge(Config.load(args.config), os.environ["BANANAVIBE_TOKEN"])
+        config = Config.load(args.config, control_repository=workflow_repository())
+        forge = Forge(config, os.environ["BANANAVIBE_TOKEN"])
         package = export_package(forge, args.config, work / "agent.tar.gz", maximum=store.settings()["max_mib"])
         print(json.dumps(store.upload(package), indent=2))
     return 0

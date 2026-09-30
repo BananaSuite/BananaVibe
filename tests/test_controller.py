@@ -125,3 +125,16 @@ def test_help_models_and_unknown_task(forge, store):
     assert "no task" in forge.posts[-1]
     controller.command(3, Command("status"), "maintainer", "e4")
     assert "No task yet" in forge.posts[-1]
+
+
+def test_start_is_ignored_only_while_a_runner_holds_the_task(forge, store):
+    controller = Controller(forge, store, log=lambda *_: None)
+    assert controller.command(3, Command("start"), "maintainer", "e1") == 3
+    # The job that should have claimed the queued task died: start again.
+    assert controller.command(3, Command("start"), "maintainer", "e2") == 3
+    store.claim(3, "live-runner")
+    assert controller.command(3, Command("start"), "maintainer", "e3") is None
+    # The runner vanished without releasing its lease.
+    store.mutate(3, lambda state: {**state, "lease_until": 1})
+    assert controller.command(3, Command("start"), "maintainer", "e4") == 3
+    assert store.claim(3, "new-runner")["runner"] == "new-runner"

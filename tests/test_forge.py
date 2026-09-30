@@ -28,6 +28,12 @@ class API(BaseHTTPRequestHandler):
             status, result = server.installation_status, {"repositories": []}
         elif "/collaborators/" in route:
             result = {"permission": "write" if "/maintainer/" in route else "read"}
+        elif route.endswith("/limited"):
+            self.send_response(403)
+            self.send_header("Retry-After", "60")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         elif route.endswith("/redirect"):
             self.send_response(302)
             self.send_header("Location", "http://127.0.0.1:1/steal")
@@ -158,3 +164,14 @@ def test_client_never_follows_redirects_or_leaks_bodies(api):
 def test_missing_token_is_explained():
     with pytest.raises(ValueError, match="BANANAVIBE_TOKEN"):
         Forge(make_config(), "")
+
+
+def test_forgejo_lookup_survives_many_pull_requests(api):
+    api.pulls = [{"number": n, "state": "open", "head": {"ref": f"feature-{n}"}} for n in range(50)]
+    assert forge_for(api, "forgejo").find_pull("bananavibe/x-1") is None
+
+
+def test_secondary_rate_limits_are_transient(api):
+    with pytest.raises(ForgeError) as error:
+        forge_for(api, "github").call("PUT", "/limited")
+    assert error.value.status == 429

@@ -1,0 +1,41 @@
+# Example: BananaWiki + BananaChat production-readiness run on a dedicated VPS.
+# Workspace layout:  ~/bananasuite/{BananaWiki,BananaChat,<landing sites>}  with this file in ~/bananasuite/.bananavibe/
+
+[run]
+name = "bananasuite"
+workers = ["claude", "codex"]      # Claude Code (Max plan) works; Codex takes over while Claude is limited
+reviewer = "codex"
+session_timeout_minutes = 180
+idle_timeout_minutes = 40
+checkpoint_every = 5
+pause_at_checkpoint = false        # set true to read each report before it continues
+done_approvals = 2
+
+[git]
+branch = "bananavibe/work"
+push = false
+
+# Replace with the real commands of each project. Keep them strict.
+[[checks]]
+name = "wiki-tests"
+run = "make test"
+cwd = "BananaWiki"
+timeout_minutes = 40
+
+[[checks]]
+name = "chat-tests"
+run = "make test"
+cwd = "BananaChat"
+timeout_minutes = 40
+
+[agents.claude]
+model = "opus"
+effort = "max"
+
+[agents.codex]
+# "gpt-6.1-sol" is not available to Codex with a ChatGPT login (only with an API key, `codex login --with-api-key`).
+model = "gpt-5.6-terra"
+effort = "ultra"
+
+[notify]
+command = ""

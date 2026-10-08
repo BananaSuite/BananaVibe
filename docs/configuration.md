@@ -12,8 +12,9 @@ A run lives in `.bananavibe/` inside the workspace:
 | `HANDOFF.md`, `DONE.md`, `REVIEW.md` | agents | per-session handoff, done claim, reviewer verdict (consumed by the supervisor) |
 | `FEEDBACK.md` | supervisor | what the next session must address first |
 | `INBOX.md` | `bananavibe say` | your messages for the next session |
-| `state.json`, `control.json` | supervisor / CLI | run state and pending commands |
-| `logs/` | supervisor | `supervisor.log`, one raw log per session, check output |
+| `ANSWERS.md` | `bananavibe ask` | your questions and the answers you got |
+| `state.json`, `control.json` | supervisor / CLI | run state (including every session and its agent session id) and pending commands |
+| `logs/` | supervisor | `supervisor.log`, `supervisor.out` (background process output), one raw log per session, check output, `ask/` |
 | `reports/` | supervisor | checkpoint and final reports (`latest.md`), archived reviews and done claims |
 | `prompts/` | supervisor | the last prompt sent for each session type |
 
@@ -26,7 +27,7 @@ Every key below is optional. Unknown keys are rejected, so typos don't pass sile
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `name` | folder name | used for the tmux session (`bananavibe-<name>`) and notifications |
+| `name` | folder name | used in notifications, export file names and the tmux session of `start --tmux` |
 | `workers` | `["claude"]` | agents that do the work, in order of preference |
 | `reviewer` | first worker | agent that audits at checkpoints and on done claims; another model is better |
 | `strategy` | `"failover"` | `failover`: always prefer the first available worker. `round-robin`: rotate every session |
@@ -39,6 +40,9 @@ Every key below is optional. Unknown keys are rejected, so typos don't pass sile
 | `pause_at_checkpoint` | `false` | pause after each checkpoint report until `bananavibe resume` |
 | `done_approvals` | `2` | consecutive reviewer approvals needed to finish |
 | `stall_limit` | `3` | sessions without any change before the supervisor switches to another worker (and, if the plan is complete and checks pass, verifies the work as done) |
+| `resume_sessions` | `true` | after `pause --now` / `stop --now`, resume the interrupted agent conversation itself (Claude Code, same machine). Otherwise a fresh session is told what the interrupted one was doing |
+| `asker` | the reviewer | agent that answers `bananavibe ask` |
+| `ask_timeout_minutes` | `15` | how long an answer may take |
 
 ## `[retry]`
 
@@ -104,6 +108,10 @@ What each built-in runs:
 - **codex**: `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json -C <workspace>
   [-m] [-c model_reasoning_effort=…] -`, prompt on stdin.
 - **opencode**: `opencode run --auto --format json [-m]`, with a message telling it to read the prompt file.
+
+For `bananavibe ask` the agents run read-only: Claude Code without the permission bypass and with only reading
+tools allowed (`Read`, `Grep`, `Glob`, `git log/show/diff/status`, `ls`, `cat`…); Codex with `--sandbox
+read-only`; OpenCode without `--auto`. Custom agents are only told not to change anything.
 
 ### Custom agents
 

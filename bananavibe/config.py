@@ -48,6 +48,9 @@ class Config:
     review_at_checkpoint: bool = True
     done_approvals: int = 2
     stall_limit: int = 3
+    resume_sessions: bool = True
+    asker: str = ""
+    ask_timeout_minutes: float = 15
 
     retry_initial_seconds: float = 30
     retry_max_seconds: float = 1800
@@ -70,6 +73,10 @@ class Config:
     @property
     def reviewer_name(self) -> str:
         return self.reviewer or self.workers[0]
+
+    @property
+    def asker_name(self) -> str:
+        return self.asker or self.reviewer_name
 
 
 def _default_agent(name: str, type_: str) -> AgentConfig:
@@ -108,7 +115,7 @@ def parse(data: dict, workspace: Path) -> Config:
     _check_unknown(run, {
         "name", "workers", "reviewer", "strategy", "session_timeout_minutes", "idle_timeout_minutes",
         "max_iterations", "max_hours", "checkpoint_every", "pause_at_checkpoint", "review_at_checkpoint",
-        "done_approvals", "stall_limit",
+        "done_approvals", "stall_limit", "resume_sessions", "asker", "ask_timeout_minutes",
     }, "run")
     cfg.name = _get(run, "name", str, workspace.resolve().name or "bananavibe")
     cfg.workers = _str_list(run, "workers", cfg.workers)
@@ -123,6 +130,9 @@ def parse(data: dict, workspace: Path) -> Config:
     cfg.review_at_checkpoint = _get(run, "review_at_checkpoint", bool, cfg.review_at_checkpoint)
     cfg.done_approvals = _get(run, "done_approvals", int, cfg.done_approvals)
     cfg.stall_limit = _get(run, "stall_limit", int, cfg.stall_limit)
+    cfg.resume_sessions = _get(run, "resume_sessions", bool, cfg.resume_sessions)
+    cfg.asker = _get(run, "asker", str, "")
+    cfg.ask_timeout_minutes = _get(run, "ask_timeout_minutes", float, cfg.ask_timeout_minutes)
 
     retry = data.get("retry", {})
     _check_unknown(retry, {"initial_seconds", "max_seconds", "limit_fallback_seconds", "auth_seconds"}, "retry")
@@ -179,7 +189,7 @@ def parse(data: dict, workspace: Path) -> Config:
             raise ConfigError(f"[agents.{name}].command must contain {{prompt}} or {{prompt_file}}")
         cfg.agents[name] = agent
 
-    for name in [*cfg.workers, cfg.reviewer_name]:
+    for name in [*cfg.workers, cfg.reviewer_name, cfg.asker_name]:
         if name not in cfg.agents:
             if name in KNOWN_TYPES and name != "custom":
                 cfg.agents[name] = _default_agent(name, name)
@@ -199,7 +209,7 @@ def parse(data: dict, workspace: Path) -> Config:
         raise ConfigError("[run].workers must name at least one agent")
     if cfg.strategy not in ("failover", "round-robin"):
         raise ConfigError("[run].strategy must be 'failover' or 'round-robin'")
-    if cfg.session_timeout_minutes <= 0 or cfg.idle_timeout_minutes <= 0:
+    if cfg.session_timeout_minutes <= 0 or cfg.idle_timeout_minutes <= 0 or cfg.ask_timeout_minutes <= 0:
         raise ConfigError("timeouts must be positive")
     if cfg.done_approvals < 1:
         raise ConfigError("[run].done_approvals must be at least 1")

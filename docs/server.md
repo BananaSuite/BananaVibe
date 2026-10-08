@@ -17,7 +17,7 @@ you. A normal user is still the better default.
 ## 2. Install the tools
 
 ```bash
-apt update && apt install -y git tmux python3 curl
+apt update && apt install -y git python3 curl
 # Agents (pick the ones you use), then log each one in once, interactively:
 curl -fsSL https://claude.ai/install.sh | bash && claude          # /login
 npm install -g @openai/codex && codex login                         # or: codex login --device-auth over SSH
@@ -42,7 +42,7 @@ bananavibe doctor --live
 ## 4. Start, leave, come back
 
 ```bash
-bananavibe start            # detached tmux session "bananavibe-<name>"
+bananavibe start            # in the background (or `start --tmux` if you prefer a tmux window)
 exit                        # log out; it keeps going
 ```
 
@@ -50,7 +50,8 @@ Hours later:
 
 ```bash
 bananavibe status           # one screen: state, current agent, plan progress, checks, cooldowns, events
-bananavibe attach           # live view; Ctrl-b d to detach again
+bananavibe attach           # live view of the agent's transcript; Ctrl-C stops watching, not the run
+bananavibe ask "how far along is it, and is anything stuck?"
 less .bananavibe/reports/latest.md
 git -C project-a log --oneline main..bananavibe/work
 ```
@@ -61,14 +62,40 @@ Steering:
 | --- | --- |
 | change direction | `bananavibe say "…"` (read by the next session, before the plan) |
 | read every checkpoint before it continues | `pause_at_checkpoint = true`, then `bananavibe resume` |
-| stop for now | `bananavibe stop` (after the current session) or `bananavibe stop --now` (interrupts it; work is committed) |
-| continue later | `bananavibe start` again; it picks up where it stopped |
+| know something | `bananavibe ask "…"` (a read-only agent answers from the run's state, live or after it ended) |
+| pause | `bananavibe pause` (after the current session) or `pause --now` (interrupts it; `resume` continues the same session) |
+| stop for now | `bananavibe stop` (after the current session) or `bananavibe stop --now [--wait]` (interrupts it; work is committed) |
+| continue later | `bananavibe start` again; it picks up where it stopped, continuing an interrupted session |
+| move to another server | `bananavibe export --stop -o run.tar.gz`, copy it, `bananavibe -w ~/work import run.tar.gz`, `start` |
+| look inside a session | `bananavibe sessions`, `bananavibe show <#>`, `bananavibe open <#>` (the agent's own UI) |
 | retry right away after fixing a login | `bananavibe retry-now` |
 | continue a finished run with new work | `bananavibe say "…"` then `bananavibe start` |
 
 Config changes take effect on the next `bananavibe start`.
 
-## 5. Survive reboots (optional)
+Everything the background supervisor prints goes to `.bananavibe/logs/supervisor.log` (`bananavibe logs -f`);
+crashes of the supervisor itself also land in `logs/supervisor.out`.
+
+## 5. Moving a run to another machine
+
+```bash
+# old server
+bananavibe export --stop -o /tmp/run.tar.gz      # stops now; the interrupted session will be continued
+scp /tmp/run.tar.gz new-server:
+# new server (agents installed and logged in)
+bananavibe -w ~/work import ~/run.tar.gz
+bananavibe -w ~/work doctor --live && bananavibe -w ~/work start
+```
+
+The archive has the run directory and a `git bundle` of every repository with all branches, so no shared remote
+is needed. The import recreates the repositories (or fast-forwards existing clones; it refuses to overwrite
+diverged work unless you pass `--force`), sets the original remote URL as `origin`, and clears cooldowns, since
+limits belong to the old machine's logins. Ignored files (dependencies, build output, local databases) don't
+travel: have the agents or a setup script recreate them. A Claude Code conversation can only be resumed natively
+on the machine where it ran; elsewhere the next session starts fresh with a summary of what the interrupted one
+was doing.
+
+## 6. Survive reboots (optional)
 
 A systemd unit restarts the supervisor after crashes and reboots:
 
@@ -92,7 +119,8 @@ WantedBy=multi-user.target
 ```
 
 `systemctl enable --now bananavibe`, then follow it with `journalctl -fu bananavibe` or `bananavibe logs -f`.
-Use either systemd or `bananavibe start`, not both. A finished run doesn't restart: `run` exits immediately
+Use either systemd or `bananavibe start`, not both (`attach`, `ask`, `pause` and the rest work the same way
+with either). A finished run doesn't restart: `run` exits immediately
 until you give new instructions.
 
 ## Costs and limits

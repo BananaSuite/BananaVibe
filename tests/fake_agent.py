@@ -13,6 +13,13 @@ from pathlib import Path
 ws = Path(sys.argv[1])
 prompt = Path(sys.argv[2]).read_text()
 fake = ws / ".fake"
+if "answer the operator's questions" in prompt:
+    # `bananavibe ask`: answered outside the scripted session sequence.
+    n = len(list(fake.glob("ask-*.md")))
+    (fake / f"ask-{n:03d}.md").write_text(prompt)
+    status = re.search(r"^- Status: (\w+)", prompt, re.M)
+    print(f"ANSWER: the run status is {status.group(1) if status else 'unknown'}.")
+    sys.exit(0)
 script = json.loads((fake / "script.json").read_text())
 calls = sorted(fake.glob("prompt-*.md"))
 n = len(calls)

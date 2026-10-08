@@ -21,6 +21,8 @@ review_at_checkpoint = true
 pause_at_checkpoint = false      # true = wait for `bananavibe resume` after each checkpoint report
 done_approvals = 2               # consecutive reviewer approvals needed to finish
 stall_limit = 3                  # sessions without progress before switching agent
+resume_sessions = true           # continue a session interrupted by `pause --now` / `stop --now` in the same conversation
+# asker = ""                     # agent that answers `bananavibe ask` ("" = the reviewer)
 
 [retry]
 initial_seconds = 30             # backoff for outages and crashes, doubling up to max_seconds

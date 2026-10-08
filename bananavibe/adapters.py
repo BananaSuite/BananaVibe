@@ -151,12 +151,16 @@ def _short(text: str, n: int = 160) -> str:
 class StreamParser:
     """Base parser for one session. Subclasses read the agent's JSON event stream."""
 
+    plain_output = True  # plain-text agents: their output is their final message
+
     def __init__(self) -> None:
         self.errors: list[str] = []
         self.raw_tail: list[str] = []
         self.final_text = ""
         self.finished_ok = False
         self.usage: dict = {}
+        self.session_id = ""  # the agent's own conversation id, for `bananavibe open` and resuming
+        self.plain: list[str] = []
 
     def add_usage(self, cost: float | None = None, tokens: int = 0) -> None:
         if isinstance(cost, (int, float)):
@@ -165,6 +169,8 @@ class StreamParser:
             self.usage["tokens"] = self.usage.get("tokens", 0) + int(tokens)
 
     def finish(self, exit_code: int) -> Outcome:
+        if self.plain_output and not self.final_text:
+            self.final_text = "\n".join(self.plain[-200:]).strip()
         out = self.outcome(exit_code)
         out.usage = dict(self.usage)
         return out
@@ -177,9 +183,16 @@ class StreamParser:
         try:
             event = json.loads(line)
         except ValueError:
+            if self.plain_output:
+                self.plain.append(line)
             return [_short(line)] if line.strip() else []
         if not isinstance(event, dict):
             return []
+        if not self.session_id:
+            sid = (event.get("session_id") or event.get("sessionID") or (event.get("part") or {}).get("sessionID")
+                   or (event.get("thread_id") if event.get("type") == "thread.started" else None))
+            if isinstance(sid, str) and sid:
+                self.session_id = sid
         return self.on_event(event)
 
     def on_event(self, event: dict) -> list[str]:
@@ -203,6 +216,8 @@ def _tool_hint(inp: dict) -> str:
 
 
 class ClaudeParser(StreamParser):
+    plain_output = False
+
     def on_event(self, ev: dict) -> list[str]:
         t = ev.get("type")
         out: list[str] = []
@@ -259,6 +274,8 @@ class ClaudeParser(StreamParser):
 
 
 class CodexParser(StreamParser):
+    plain_output = False
+
     def on_event(self, ev: dict) -> list[str]:
         t = ev.get("type")
         if t in ("item.started", "item.completed"):
@@ -298,6 +315,8 @@ class CodexParser(StreamParser):
 
 
 class OpenCodeParser(StreamParser):
+    plain_output = False
+
     def on_event(self, ev: dict) -> list[str]:
         t = ev.get("type")
         part = ev.get("part") or {}
@@ -340,6 +359,8 @@ class Invocation:
 
 class Adapter:
     parser_class = StreamParser
+    supports_resume = False     # can continue an interrupted conversation by its session id
+    enforces_read_only = False  # `read_only` is enforced by the agent itself, not just asked for in the prompt
 
     def __init__(self, cfg: AgentConfig):
         self.cfg = cfg
@@ -351,19 +372,40 @@ class Adapter:
     def base_env(self) -> dict[str, str]:
         return dict(self.cfg.env)
 
-    def invocation(self, prompt: str, prompt_file: Path, cwd: Path) -> Invocation:
+    def invocation(self, prompt: str, prompt_file: Path, cwd: Path, *, read_only: bool = False,
+                   resume_id: str | None = None) -> Invocation:
         raise NotImplementedError
+
+    def open_command(self, session_id: str, cwd: Path) -> list[str] | None:
+        """Command that opens a recorded session in the agent's own interactive UI."""
+        return None
 
     def parser(self) -> StreamParser:
         return self.parser_class()
 
 
+# Tools a read-only `bananavibe ask` session may use: reading files and inspecting git history.
+READ_ONLY_CLAUDE_TOOLS = ["Read", "Grep", "Glob", "LS", "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)",
+                          "Bash(git status:*)", "Bash(git branch:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)",
+                          "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)"]
+
+
 class ClaudeAdapter(Adapter):
     parser_class = ClaudeParser
+    supports_resume = True
+    enforces_read_only = True
 
-    def invocation(self, prompt: str, prompt_file: Path, cwd: Path) -> Invocation:
-        argv = [*self.cfg.command, "-p", "--dangerously-skip-permissions",
-                "--output-format", "stream-json", "--verbose"]
+    def invocation(self, prompt: str, prompt_file: Path, cwd: Path, *, read_only: bool = False,
+                   resume_id: str | None = None) -> Invocation:
+        argv = [*self.cfg.command, "-p", "--output-format", "stream-json", "--verbose"]
+        if read_only:
+            # No permission bypass: in -p mode anything not allowed here is denied.
+            argv += ["--allowedTools", ",".join(READ_ONLY_CLAUDE_TOOLS),
+                     "--disallowedTools", "Edit,Write,NotebookEdit"]
+        else:
+            argv.insert(len(self.cfg.command) + 1, "--dangerously-skip-permissions")
+        if resume_id:
+            argv += ["--resume", resume_id]
         if self.cfg.model:
             argv += ["--model", self.cfg.model]
         if self.cfg.effort:
@@ -375,13 +417,18 @@ class ClaudeAdapter(Adapter):
             env.setdefault("IS_SANDBOX", "1")
         return Invocation(argv, prompt, env)
 
+    def open_command(self, session_id: str, cwd: Path) -> list[str] | None:
+        return [*self.cfg.command, "--resume", session_id]
+
 
 class CodexAdapter(Adapter):
     parser_class = CodexParser
+    enforces_read_only = True
 
-    def invocation(self, prompt: str, prompt_file: Path, cwd: Path) -> Invocation:
-        argv = [*self.cfg.command, "exec", "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check", "--json", "-C", str(cwd)]
+    def invocation(self, prompt: str, prompt_file: Path, cwd: Path, *, read_only: bool = False,
+                   resume_id: str | None = None) -> Invocation:
+        mode = ["--sandbox", "read-only"] if read_only else ["--dangerously-bypass-approvals-and-sandbox"]
+        argv = [*self.cfg.command, "exec", *mode, "--skip-git-repo-check", "--json", "-C", str(cwd)]
         if self.cfg.model:
             argv += ["-m", self.cfg.model]
         if self.cfg.effort:
@@ -389,12 +436,16 @@ class CodexAdapter(Adapter):
         argv += [*self.cfg.args, "-"]
         return Invocation(argv, prompt, self.base_env())
 
+    def open_command(self, session_id: str, cwd: Path) -> list[str] | None:
+        return [*self.cfg.command, "resume", session_id]
+
 
 class OpenCodeAdapter(Adapter):
     parser_class = OpenCodeParser
 
-    def invocation(self, prompt: str, prompt_file: Path, cwd: Path) -> Invocation:
-        argv = [*self.cfg.command, "run", "--auto", "--format", "json"]
+    def invocation(self, prompt: str, prompt_file: Path, cwd: Path, *, read_only: bool = False,
+                   resume_id: str | None = None) -> Invocation:
+        argv = [*self.cfg.command, "run", *([] if read_only else ["--auto"]), "--format", "json"]
         model = self.cfg.model
         if model and self.cfg.effort and "#" not in model:
             model = f"{model}#{self.cfg.effort}"
@@ -406,9 +457,13 @@ class OpenCodeAdapter(Adapter):
                        "Read that whole file first and follow it exactly."]
         return Invocation(argv, None, self.base_env())
 
+    def open_command(self, session_id: str, cwd: Path) -> list[str] | None:
+        return [*self.cfg.command, str(cwd), "--session", session_id]
+
 
 class CustomAdapter(Adapter):
-    def invocation(self, prompt: str, prompt_file: Path, cwd: Path) -> Invocation:
+    def invocation(self, prompt: str, prompt_file: Path, cwd: Path, *, read_only: bool = False,
+                   resume_id: str | None = None) -> Invocation:
         subs = {"{prompt}": prompt, "{prompt_file}": str(prompt_file), "{model}": self.cfg.model,
                 "{effort}": self.cfg.effort, "{cwd}": str(cwd)}
         argv = []

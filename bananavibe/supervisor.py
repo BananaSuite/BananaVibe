@@ -13,6 +13,7 @@ import os
 import random
 import re
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -51,7 +52,9 @@ class Supervisor:
         self.cfg = cfg
         self.console = console
         self.state = State(paths)
-        self.stop_event = threading.Event()
+        self.stop_event = threading.Event()  # end the run
+        self.interrupt = threading.Event()   # cut the current agent session short (stop or pause now)
+        self.host = socket.gethostname()
         self.adapters = {name: make_adapter(a) for name, a in cfg.agents.items()}
         self.repos: list[Path] = []
         self.feedback: list[str] = []
@@ -65,8 +68,24 @@ class Supervisor:
                 raise KeyboardInterrupt
             self.console.warn("stop requested: finishing up (press Ctrl-C again to abort immediately)")
             self.stop_event.set()
+            self.interrupt.set()
         signal.signal(signal.SIGINT, handler)
         signal.signal(signal.SIGTERM, handler)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)  # survive the terminal that started it closing
+
+    def _watch_control(self, done: threading.Event) -> None:
+        """Turn `stop --now` and `pause --now` into an interrupt of the running session (any machine, no signals)."""
+        while not done.wait(1):
+            control = read_control(self.paths)
+            if control.get("stop_now"):
+                set_control(self.paths, stop_now=False)
+                self.console.warn("stop requested by operator: interrupting the session")
+                self.stop_event.set()
+                self.interrupt.set()
+            elif control.get("pause_now") and self.state["current"] and not self.interrupt.is_set():
+                self.console.info("pause requested by operator: interrupting the session")
+                self.interrupt.set()
 
     def _setup_repos(self) -> None:
         self.repos = gitops.discover(self.paths.workspace, self.cfg.git_repos)
@@ -122,6 +141,10 @@ class Supervisor:
                 self.state.agent(name)["cooldown_until"] = None
             self.console.info("operator asked to retry now: cooldowns cleared")
         if control.get("pause"):
+            if control.get("pause_now"):
+                set_control(self.paths, pause_now=False)
+            if not self.stop_event.is_set():
+                self.interrupt.clear()
             if self.state["status"] != "paused":
                 self.console.info("paused. Resume with `bananavibe resume`.")
                 self._set_status("paused", "paused by operator")
@@ -223,6 +246,36 @@ class Supervisor:
         self.state.event(oc.kind, f"{name}: {oc.message[:300]}")
         self._save()
 
+    def _continuation(self, label: str, agent: str) -> tuple[str, str | None]:
+        """Prompt note (and native session to resume) when the last session of this kind was interrupted."""
+        intr = self.state["interrupted"]
+        if not intr:
+            return "", None
+        if intr["label"] != label:
+            # Something else runs next (e.g. a review was interrupted, a work session starts): nothing to continue.
+            self.state["interrupted"] = None
+            return "", None
+        resume = None
+        if (self.cfg.resume_sessions and intr.get("session_id") and intr["agent"] == agent
+                and intr.get("host") == self.host and self.adapters[agent].supports_resume):
+            resume = intr["session_id"]
+        activity = "\n".join(intr.get("activity") or []) or "(nothing recorded)"
+        note = (f"\n# Continuing an interrupted session\n\nThe previous {label} session (by {intr['agent']}, "
+                f"started {intr.get('started', '?')}) was interrupted by the operator ({intr.get('reason', 'stop')}) "
+                "before it finished. Whatever it changed is still in the workspace (and committed). Continue where it "
+                "left off: check the current state of the files and the plan, then finish the job. "
+                + ("This is the same conversation, resumed: you can rely on what you already know, but re-check "
+                   "the files, the operator may have changed things while it was paused. " if resume else "")
+                + f"Its last recorded activity:\n\n```\n{activity}\n```\n")
+        return note, resume
+
+    def _remember_interruption(self, label: str, agent: str, result: SessionResult, started: str) -> None:
+        self.state["interrupted"] = {
+            "label": label, "agent": agent, "host": self.host, "session_id": result.session_id,
+            "started": started, "at": iso(now()), "activity": result.activity[-30:],
+            "reason": "pause now" if not self.stop_event.is_set() else "stop now",
+        }
+
     def run_agent(self, candidates: list[str], make_prompt: Callable[[str], str], label: str,
                   on_partial: Callable[[str, SessionResult], None] | None = None) -> tuple[str, SessionResult]:
         """Run one session with the first available agent, retrying through any failure until it succeeds."""
@@ -233,21 +286,40 @@ class Supervisor:
                 names = ", ".join(candidates)
                 self._wait_until(wait_until, f"all agents ({names}) are cooling down")
                 continue
-            prompt = make_prompt(name)
+            note, resume_id = self._continuation(label, name)
+            prompt = make_prompt(name) + note
             self.paths.prompts.mkdir(parents=True, exist_ok=True)
             prompt_file = self.paths.prompts / f"{label}.md"
             write_atomic(prompt_file, prompt)
             iteration = self.state["iteration"] + 1
             log_path = self.paths.session_log(iteration, f"{label}-{name}")
+            started = iso(now())
             self.state["attempts"] += 1
             self.state["current_agent"] = name
-            self.state["session_started_at"] = iso(now())
+            self.state["session_started_at"] = started
+            self.state["current"] = {"label": label, "agent": name, "log": self.paths.rel(log_path),
+                                     "session_id": resume_id or "", "started": started, "iteration": iteration}
             self._set_status("running", f"{label} session with {name} (log: {self.paths.rel(log_path)})")
-            self.console.info(f"▶ {label} session {iteration} with {name} (log: {self.paths.rel(log_path)})")
+            self.console.info(f"▶ {label} session {iteration} with {name} (log: {self.paths.rel(log_path)})"
+                              + (f", resuming {resume_id}" if resume_id else ""))
+
+            def on_session_id(sid: str) -> None:
+                if self.state["current"]:
+                    self.state["current"]["session_id"] = sid
+                    self._save()
+
             result = run_session(self.adapters[name], prompt, prompt_file, self.paths.workspace, log_path,
                                  self.console, self.cfg.session_timeout_minutes * 60,
-                                 self.cfg.idle_timeout_minutes * 60, self.stop_event)
+                                 self.cfg.idle_timeout_minutes * 60, self.interrupt,
+                                 resume_id=resume_id, on_session_id=on_session_id)
             self.state["current_agent"] = None
+            self.state["current"] = None
+            self.state.record_session({
+                "iteration": iteration, "label": label, "agent": name, "host": self.host,
+                "session_id": result.session_id or resume_id or "", "log": self.paths.rel(log_path),
+                "started": started, "seconds": round(result.seconds),
+                "outcome": "interrupted" if result.interrupted else result.outcome.kind,
+            })
             info = self.state.agent(name)
             info["seconds"] = info.get("seconds", 0) + result.seconds
             usage = result.outcome.usage
@@ -259,17 +331,31 @@ class Supervisor:
                 info["windows"] = usage["windows"]
                 info.setdefault("windows_at_start", usage["windows"])
             if result.interrupted:
+                self._remember_interruption(label, name, result, started)
                 if on_partial:
                     on_partial(name, result)
-                raise StopRun("interrupted")
+                if self.stop_event.is_set():
+                    raise StopRun("interrupted")
+                # Paused now: the pause happens in _check_control, then the same session continues.
+                self.interrupt.clear()
+                self._save()
+                self.console.info(f"{label} session interrupted for a pause; it continues after `bananavibe resume`")
+                continue
             if result.outcome.kind == OK:
                 info["sessions"] += 1
                 info["consecutive_failures"] = 0
                 info["cooldown_until"] = None
+                self.state["interrupted"] = None
                 self.console.info(f"■ {name} finished after {human_duration(result.seconds)}"
                                   + (" (session time limit)" if result.timed_out else ""))
                 self._save()
                 return name, result
+            if resume_id and result.outcome.kind not in (LIMIT, AUTH):
+                # The conversation could not be resumed (expired, other login...): start it fresh, no penalty.
+                self.console.warn(f"{name}: could not resume session {resume_id}; starting a fresh one")
+                self.state["interrupted"]["session_id"] = ""
+                self._save()
+                continue
             if result.idle_killed:
                 result.outcome.message = (f"no output for {self.cfg.idle_timeout_minutes:g} minutes; "
                                           "the session was killed")
@@ -282,7 +368,9 @@ class Supervisor:
     def _record_handoff(self, iteration: int, agent: str, result: SessionResult) -> None:
         handoff = read_text(self.paths.handoff).strip()
         outcome = "ok" if result.outcome.kind == OK else f"{result.outcome.kind}: {result.outcome.message[:200]}"
-        if result.timed_out:
+        if result.interrupted:
+            outcome = "interrupted by the operator"
+        elif result.timed_out:
             outcome = "session time limit reached"
         header = f"## Session {iteration} · {agent} · {now().strftime('%Y-%m-%d %H:%M')} · " \
                  f"{human_duration(result.seconds)} · {outcome}"
@@ -291,7 +379,7 @@ class Supervisor:
             self.paths.handoff.unlink(missing_ok=True)
         else:
             body = "(no HANDOFF.md written)\n\nLast message from the agent:\n\n" + tail(result.outcome.final_text, 3000)
-            if result.outcome.kind == OK and not result.timed_out:
+            if result.outcome.kind == OK and not result.timed_out and not result.interrupted:
                 self.feedback.append(f"The previous session did not write `{self.paths.rel(self.paths.handoff)}`. "
                                      "Always write it before you finish.")
         with self.paths.journal.open("a", encoding="utf-8") as f:
@@ -338,7 +426,8 @@ class Supervisor:
             # A session cut off by a limit or outage may still have done useful work: keep it.
             if self._tree_state() != before:
                 self._record_handoff(iteration, agent, result)
-                self._snapshot(f"bananavibe: session {iteration} by {agent} (cut off: {result.outcome.kind})")
+                why = "interrupted" if result.interrupted else result.outcome.kind
+                self._snapshot(f"bananavibe: session {iteration} by {agent} (cut off: {why})")
 
         try:
             agent, result = self.run_agent(self._order_workers(), make_prompt, "work", on_partial)
@@ -529,10 +618,14 @@ class Supervisor:
             self.console.warn("another supervisor is already running in this workspace")
             return 2
         self._install_signals()
+        watcher_done = threading.Event()
         try:
-            set_control(self.paths, stop=None, retry_now=False, pause=False)
+            set_control(self.paths, stop=None, retry_now=False, pause=False, pause_now=False, stop_now=False)
+            threading.Thread(target=self._watch_control, args=(watcher_done,), daemon=True).start()
             self.goal_text = read_text(self.paths.goal)
             self.state["pid"] = os.getpid()
+            self.state["host"] = self.host
+            self.state["current"] = None
             self.state["started_at"] = self.state["started_at"] or iso(now())
             self.state["finished_at"] = None
             self._setup_repos()
@@ -540,7 +633,9 @@ class Supervisor:
             if pending:
                 self.feedback = [pending]
             self._set_status("running", "started")
-            self.notify("start", f"run '{self.cfg.name}' started at iteration {self.state['iteration']}")
+            self.notify("start", f"run '{self.cfg.name}' started at iteration {self.state['iteration']} on {self.host}")
+            if self.state["interrupted"]:
+                self.console.info(f"the interrupted {self.state['interrupted']['label']} session will be continued")
             self.console.info(f"run '{self.cfg.name}': workers {', '.join(self.cfg.workers)}, reviewer "
                               f"{self.cfg.reviewer_name}, {len(self.cfg.checks)} check(s)")
             while True:
@@ -573,7 +668,10 @@ class Supervisor:
             self.notify("attention", f"supervisor crashed: {type(e).__name__}: {e}")
             raise
         finally:
+            watcher_done.set()
             self.state["pid"] = None
+            self.state["current"] = None
+            self.state["current_agent"] = None
             self._save()
             lock.release()
 

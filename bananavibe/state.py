@@ -35,6 +35,8 @@ class Paths:
         self.reports = self.root / "reports"
         self.prompts = self.root / "prompts"
         self.supervisor_log = self.root / "logs" / "supervisor.log"
+        self.supervisor_out = self.root / "logs" / "supervisor.out"  # stdout/stderr of a background supervisor
+        self.answers = self.root / "ANSWERS.md"
 
     def session_log(self, iteration: int, label: str) -> Path:
         return self.logs / f"{iteration:04d}-{label}-{now().strftime('%Y%m%d-%H%M%S')}.log"
@@ -78,7 +80,7 @@ def plan_stats(text: str) -> PlanStats:
 
 
 DEFAULT_STATE = {
-    "status": "new",  # new | running | waiting | paused | done | stopped
+    "status": "new",  # new | running | waiting | paused | done | stopped | crashed
     "detail": "",
     "iteration": 0,
     "attempts": 0,
@@ -97,6 +99,10 @@ DEFAULT_STATE = {
     "agents": {},  # name -> {"sessions", "failures", "cooldown_until", "last_error", "consecutive_failures"}
     "events": [],
     "pid": None,
+    "host": None,         # machine the supervisor runs (or last ran) on
+    "current": None,      # the session running now: {label, agent, log, session_id, started}
+    "interrupted": None,  # a session cut short by the operator, continued by the next session of its kind
+    "history": [],        # every session attempt: {n, iteration, label, agent, session_id, log, ...}
 }
 
 
@@ -121,12 +127,19 @@ class State:
         self.data["events"].append({"at": iso(now()), "kind": kind, "msg": msg[:500]})
         del self.data["events"][:-200]
 
+    def record_session(self, entry: dict) -> None:
+        history = self.data["history"]
+        entry = {"n": history[-1]["n"] + 1 if history else 1, **entry}
+        self.data["history"].append(entry)
+        del self.data["history"][:-500]
+
     def save(self) -> None:
         self.data["updated_at"] = iso(now())
         write_json(self.paths.state, self.data)
 
 
-# Control: small commands left by `bananavibe pause/resume/stop/say` for the supervisor.
+# Control: small commands left by `bananavibe pause/resume/stop` for the supervisor.
+# Keys: pause, pause_now (interrupt the session, then pause), stop, stop_now, retry_now.
 
 def read_control(paths: Paths) -> dict:
     return read_json(paths.control, {}) or {}

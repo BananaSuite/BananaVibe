@@ -8,7 +8,9 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from bananavibe.adapters import TRANSIENT, Adapter, Outcome
@@ -23,6 +25,8 @@ class SessionResult:
     timed_out: bool = False
     idle_killed: bool = False
     interrupted: bool = False
+    session_id: str = ""                               # the agent's own conversation id, if it reports one
+    activity: list[str] = field(default_factory=list)  # the last human-readable lines of the session
 
 
 def kill_group(proc: subprocess.Popen, grace: float = 15) -> None:
@@ -51,9 +55,14 @@ def run_session(
     timeout_s: float,
     idle_timeout_s: float,
     stop: threading.Event,
+    *,
+    read_only: bool = False,
+    resume_id: str | None = None,
+    on_session_id: Callable[[str], None] | None = None,
 ) -> SessionResult:
-    inv = adapter.invocation(prompt, prompt_file, cwd)
+    inv = adapter.invocation(prompt, prompt_file, cwd, read_only=read_only, resume_id=resume_id)
     parser = adapter.parser()
+    activity: deque[str] = deque(maxlen=40)
     env = {**os.environ, **inv.env}
     started = time.monotonic()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,8 +112,12 @@ def run_session(
                 last_output = time.monotonic()
                 log.write(line)
                 log.flush()
+                had_id = bool(parser.session_id)
                 for shown in parser.feed(line.rstrip("\n")):
+                    activity.append(shown)
                     console.agent(adapter.name, shown)
+                if parser.session_id and not had_id and on_session_id:
+                    on_session_id(parser.session_id)
             t = time.monotonic()
             if eof:
                 break
@@ -136,7 +149,7 @@ def run_session(
                     break
                 if rest:
                     log.write(rest)
-                    parser.feed(rest.rstrip("\n"))
+                    activity.extend(parser.feed(rest.rstrip("\n")))
             break
 
         try:
@@ -156,5 +169,7 @@ def run_session(
         outcome = Outcome(TRANSIENT if idle_killed else "ok", final_text=parser.final_text,
                           message="idle" if idle_killed else "timeout" if timed_out else "interrupted",
                           usage=dict(parser.usage))
-        return SessionResult(outcome, exit_code, seconds, timed_out, idle_killed, interrupted)
-    return SessionResult(parser.finish(exit_code), exit_code, seconds)
+        return SessionResult(outcome, exit_code, seconds, timed_out, idle_killed, interrupted,
+                             parser.session_id, list(activity))
+    return SessionResult(parser.finish(exit_code), exit_code, seconds, session_id=parser.session_id,
+                         activity=list(activity))

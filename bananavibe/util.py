@@ -80,19 +80,21 @@ def tail(text: str, max_chars: int) -> str:
 class Console:
     """Prints timestamped lines to the terminal and mirrors them to a log file."""
 
-    def __init__(self, logfile: Path | None = None, quiet: bool = False):
+    def __init__(self, logfile: Path | None = None, quiet: bool = False, stream=None):
         self.logfile = logfile
         self.quiet = quiet
-        self.color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        self.stream = stream
+        out = stream or sys.stdout
+        self.color = out.isatty() and not os.environ.get("NO_COLOR")
 
     def _emit(self, prefix: str, msg: str, color: str) -> None:
         stamp = now().strftime("%m-%d %H:%M:%S")
         line = f"{stamp} {prefix} {msg}"
         if not self.quiet:
             if self.color and color:
-                print(f"\033[{color}m{line}\033[0m", flush=True)
+                print(f"\033[{color}m{line}\033[0m", flush=True, file=self.stream)
             else:
-                print(line, flush=True)
+                print(line, flush=True, file=self.stream)
         if self.logfile:
             try:
                 with self.logfile.open("a", encoding="utf-8") as f:

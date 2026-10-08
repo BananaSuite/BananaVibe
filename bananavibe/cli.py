@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -15,8 +16,9 @@ import time
 import traceback
 from pathlib import Path
 
-from bananavibe import __version__, gitops, report, templates
+from bananavibe import __version__, gitops, handover, report, templates, watch
 from bananavibe.adapters import OK, make_adapter
+from bananavibe.ask import ask
 from bananavibe.config import KNOWN_TYPES, ConfigError, load
 from bananavibe.runner import run_session
 from bananavibe.state import (
@@ -110,7 +112,8 @@ def cmd_init(args) -> int:
 def cmd_run(args) -> int:
     paths = _paths(args)
     cfg = _load(paths)
-    console = Console(paths.supervisor_log)
+    # In the background nobody reads stdout: everything goes to logs/supervisor.log only.
+    console = Console(paths.supervisor_log, quiet=args.daemon)
     paths.logs.mkdir(parents=True, exist_ok=True)
     state = State(paths)
     if state["status"] == "done" and not args.again and not read_text(paths.inbox).strip():
@@ -142,40 +145,83 @@ def cmd_run(args) -> int:
             cfg = _load(paths)
 
 
+def _child_env() -> dict[str, str]:
+    # Carry the package location (when running from a source checkout) into the detached supervisor.
+    source_root = str(Path(__file__).resolve().parent.parent)
+    pythonpath = os.pathsep.join(p for p in (source_root, os.environ.get("PYTHONPATH", "")) if p)
+    return {**os.environ, "PYTHONPATH": pythonpath}
+
+
+def _run_argv(paths: Paths, again: bool) -> list[str]:
+    return [sys.executable, "-P", "-m", "bananavibe", "-w", str(paths.workspace), "run"] + (["--again"] if again else [])
+
+
 def cmd_start(args) -> int:
     paths = _paths(args)
     cfg = _load(paths)
-    if not shutil.which("tmux"):
-        print("bananavibe: tmux is not installed (apt install tmux), or use `bananavibe run` directly.",
-              file=sys.stderr)
-        return 2
     if supervisor_pid(paths):
         print("A supervisor is already running in this workspace. `bananavibe attach` to watch it.")
         return 1
+    if args.tmux:
+        return _start_tmux(paths, cfg, args)
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    with paths.supervisor_out.open("ab") as out:
+        out.write(f"\n--- {now():%Y-%m-%d %H:%M:%S} bananavibe start ---\n".encode())
+        out.flush()
+        # A new session: no controlling terminal, immune to the shell or SSH connection closing.
+        proc = subprocess.Popen([*_run_argv(paths, args.again), "--daemon"], cwd=paths.workspace,
+                                env=_child_env(), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                start_new_session=True, close_fds=True)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if supervisor_pid(paths) == proc.pid:
+            break
+        if proc.poll() is not None:
+            text = read_text(paths.supervisor_out).rsplit("--- ", 1)[-1].split("\n", 1)[-1].strip()
+            print(text or f"The supervisor exited right away (code {proc.returncode}).")
+            return proc.returncode or 0
+        time.sleep(0.2)
+    else:
+        print(f"The supervisor (pid {proc.pid}) has not started yet; check `bananavibe status` and "
+              f"{paths.rel(paths.supervisor_out)}.")
+        return 1
+    print(f"Started in the background (pid {proc.pid}). It keeps running after you log out.")
+    print("  watch:   bananavibe attach          (live transcript; Ctrl-C only stops watching)")
+    print("  status:  bananavibe status")
+    print("  ask:     bananavibe ask \"is it done? what's left?\"")
+    print("  pause:   bananavibe pause [--now]   stop: bananavibe stop [--now]")
+    return 0
+
+
+def _start_tmux(paths: Paths, cfg, args) -> int:
+    if not shutil.which("tmux"):
+        print("bananavibe: tmux is not installed; run `bananavibe start` without --tmux.", file=sys.stderr)
+        return 2
     session = _session_name(cfg.name)
     if subprocess.run(["tmux", "has-session", "-t", session], capture_output=True).returncode == 0:
         print(f"tmux session {session} already exists: `tmux attach -t {session}` (or kill it first).")
         return 1
-    run = [sys.executable, "-P", "-m", "bananavibe", "-w", str(paths.workspace), "run"] + (["--again"] if args.again else [])
-    shell = (f"cd {shlex.quote(str(paths.workspace))} && {shlex.join(run)}; "
+    shell = (f"cd {shlex.quote(str(paths.workspace))} && {shlex.join(_run_argv(paths, args.again))}; "
              "echo; echo '[bananavibe] supervisor exited. Press Enter to close this window.'; read _")
-    # Carry PATH (agent CLIs) and the package location (when running from a source checkout) into tmux.
-    source_root = str(Path(__file__).resolve().parent.parent)
-    pythonpath = os.pathsep.join(p for p in (source_root, os.environ.get("PYTHONPATH", "")) if p)
+    env = _child_env()
     subprocess.run(["tmux", "new-session", "-d", "-s", session, "-x", "220", "-y", "50",
-                    "-e", f"PATH={os.environ.get('PATH', '')}", "-e", f"PYTHONPATH={pythonpath}",
+                    "-e", f"PATH={env.get('PATH', '')}", "-e", f"PYTHONPATH={env['PYTHONPATH']}",
                     "bash", "-c", shell], check=True)
     subprocess.run(["tmux", "set-option", "-t", session, "history-limit", "100000"], capture_output=True)
     print(f"Started in tmux session '{session}'.")
-    print(f"  watch:   bananavibe attach      (or tmux attach -t {session}; detach with Ctrl-b d)")
+    print(f"  watch:   tmux attach -t {session} (detach with Ctrl-b d), or `bananavibe attach`")
     print("  status:  bananavibe status")
     print("  stop:    bananavibe stop [--now]")
     return 0
 
 
 def cmd_attach(args) -> int:
-    cfg = _load(_paths(args))
-    os.execvp("tmux", ["tmux", "attach", "-t", _session_name(cfg.name)])
+    paths = _paths(args)
+    cfg = _load(paths)
+    if args.tmux:
+        os.execvp("tmux", ["tmux", "attach", "-t", _session_name(cfg.name)])
+    return watch.follow(paths, cfg, raw=args.raw, max_lines=0 if args.full else args.max_lines,
+                        history=args.history)
 
 
 # ------------------------------------------------------------------ status and control
@@ -201,10 +247,20 @@ def cmd_status(args) -> int:
     if d["status"] == "waiting" and d["wait_until"]:
         until = parse_iso(d["wait_until"])
         print(f"Waiting:    until {until:%a %H:%M} ({human_duration((until - now()).total_seconds())} left)")
+    if pid:
+        print(f"Supervisor: pid {pid}" + (f" on {d['host']}" if d.get("host") else ""))
     if d.get("current_agent") and d.get("session_started_at"):
         s = parse_iso(d["session_started_at"])
-        print(f"Agent:      {d['current_agent']} working for {human_duration((now() - s).total_seconds())}")
-    if control.get("pause") and d["status"] != "paused":
+        cur = d.get("current") or {}
+        print(f"Agent:      {d['current_agent']} working for {human_duration((now() - s).total_seconds())}"
+              + (f" (session {cur['session_id']})" if cur.get("session_id") else ""))
+    if d.get("interrupted"):
+        i = d["interrupted"]
+        print(f"Continuing: interrupted {i['label']} session by {i['agent']} ({i.get('reason', '')}, "
+              f"{i.get('at', '')[:16].replace('T', ' ')})")
+    if control.get("pause_now") and d["status"] != "paused":
+        print("Pending:    pause now (interrupting the session)")
+    elif control.get("pause") and d["status"] != "paused":
         print("Pending:    pause after the current session")
     if control.get("stop"):
         print("Pending:    stop after the current session")
@@ -240,32 +296,65 @@ def _signal_supervisor(paths: Paths) -> bool:
     return False
 
 
+def _wait_stopped(paths: Paths, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not supervisor_pid(paths):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def cmd_stop(args) -> int:
     paths = _paths(args)
     if not supervisor_pid(paths):
         print("No supervisor is running.")
+        set_control(paths, pause=False, pause_now=False)
         return 0
     if args.now:
+        # A signal works on this machine; the control file also works from anywhere the workspace is visible.
+        set_control(paths, stop_now=True)
         _signal_supervisor(paths)
-        print("Stopping now: the agent is interrupted and its work so far is committed.")
+        print("Stopping now: the agent is interrupted and its work so far is committed. "
+              "The next `bananavibe start` continues that session.")
     else:
         set_control(paths, stop=True)
         print("The run will stop after the current session (use --now to interrupt it).")
+    if args.wait:
+        if not _wait_stopped(paths, args.wait_timeout):
+            print("Still running after the timeout.")
+            return 1
+        print("Stopped.")
     return 0
 
 
 def cmd_pause(args) -> int:
     paths = _paths(args)
-    set_control(paths, pause=True)
-    print("The run will pause after the current session. Resume with `bananavibe resume`.")
+    if args.now:
+        set_control(paths, pause=True, pause_now=True)
+        print("Pausing now: the agent is interrupted and its work so far is committed. "
+              "`bananavibe resume` continues the same session.")
+    else:
+        set_control(paths, pause=True)
+        print("The run will pause after the current session (use --now to interrupt it). "
+              "Resume with `bananavibe resume`.")
+    if not supervisor_pid(paths):
+        print("(No supervisor is running right now: a new `bananavibe start` begins unpaused.)")
     return 0
 
 
 def cmd_resume(args) -> int:
     paths = _paths(args)
-    set_control(paths, pause=False)
-    print("Resumed." if supervisor_pid(paths) else "Pause cleared. No supervisor is running: `bananavibe start`.")
-    return 0
+    set_control(paths, pause=False, pause_now=False)
+    if supervisor_pid(paths):
+        print("Resumed.")
+        return 0
+    if not args.start:
+        print("Pause cleared. No supervisor is running: `bananavibe start` (or `bananavibe resume --start`).")
+        return 0
+    args.again = False
+    args.tmux = False
+    return cmd_start(args)
 
 
 def cmd_retry_now(args) -> int:
@@ -283,7 +372,7 @@ def cmd_say(args) -> int:
         print("bananavibe: empty message", file=sys.stderr)
         return 2
     append_inbox(paths, message)
-    print("Message queued: the next session reads it first.")
+    print("Message queued: the next session reads it first. (To get an answer instead, use `bananavibe ask`.)")
     if State(paths)["status"] == "done" and not supervisor_pid(paths):
         print("The run had finished; start it again with `bananavibe start` to act on the message.")
     return 0
@@ -314,6 +403,163 @@ def cmd_logs(args) -> int:
     os.execvp("tail", ["tail", "-n", str(args.lines), *(["-F"] if args.follow else []), str(target)])
 
 
+# ------------------------------------------------------------------ sessions, ask, handover
+
+def _find_session(state: State, ref: str) -> dict | None:
+    history = state["history"]
+    if state["current"]:
+        current = {**state["current"], "n": "now", "outcome": "running"}
+        if ref in ("now", "current", "latest", "") and current.get("session_id"):
+            return current
+    if not history:
+        return None
+    if ref in ("", "latest", "now", "current"):
+        return next((h for h in reversed(history) if h.get("session_id")), history[-1])
+    for h in reversed(history):
+        if str(h["n"]) == ref or (h.get("session_id") and h["session_id"].startswith(ref)):
+            return h
+    return None
+
+
+def cmd_sessions(args) -> int:
+    paths = _paths(args)
+    state = State(paths)
+    rows = state["history"][-args.limit:]
+    if state["current"]:
+        rows = [*rows, {**state["current"], "n": "now", "outcome": "running", "seconds": None}]
+    if not rows:
+        print("No sessions yet.")
+        return 0
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print(f"{'#':>5}  {'started':16}  {'session':16} {'agent':10} {'took':>8}  {'outcome':12} agent session id")
+    for h in rows:
+        took = human_duration(h["seconds"]) if h.get("seconds") is not None else "…"
+        print(f"{h['n']!s:>5}  {str(h.get('started', ''))[:16].replace('T', ' '):16}  "
+              f"{h['iteration']:>4} {h['label']:11} {h['agent']:10} {took:>8}  {h.get('outcome', ''):12} "
+              f"{h.get('session_id') or '-'}")
+    print("\nOpen one in the agent's own UI: `bananavibe open <#|id>`. Transcript: `bananavibe show <#>`.")
+    return 0
+
+
+def cmd_show(args) -> int:
+    paths = _paths(args)
+    cfg = _load(paths)
+    h = _find_session(State(paths), args.session)
+    if not h:
+        print("No such session.", file=sys.stderr)
+        return 1
+    path = paths.workspace / h["log"]
+    if not path.exists():
+        print(f"The log {h['log']} is gone.", file=sys.stderr)
+        return 1
+    style = watch.Style(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+    renderer = watch.renderer_for(cfg, h["agent"], style, 0 if args.full else args.max_lines)
+    for line in watch.render_file(path, renderer, raw=args.raw):
+        print(line)
+    return 0
+
+
+def cmd_open(args) -> int:
+    paths = _paths(args)
+    cfg = _load(paths)
+    state = State(paths)
+    h = _find_session(state, args.session)
+    if not h or not h.get("session_id"):
+        print("No session with a recorded agent session id (custom agents don't report one). "
+              "See `bananavibe sessions`.", file=sys.stderr)
+        return 1
+    running = (state["current"] or {}).get("session_id") == h["session_id"] and supervisor_pid(paths)
+    if running and not args.force:
+        print("That session is running right now. Opening it would fork the conversation; watch it with "
+              "`bananavibe attach` instead, or use --force to open it anyway (don't type into it).", file=sys.stderr)
+        return 1
+    if h.get("host") and h["host"] != socket.gethostname():
+        print(f"Note: this session ran on {h['host']}; the agent may not have its history on this machine.")
+    agent = cfg.agents.get(h["agent"])
+    argv = make_adapter(agent).open_command(h["session_id"], paths.workspace) if agent else None
+    if not argv:
+        print(f"Don't know how to open sessions of {h['agent']}.", file=sys.stderr)
+        return 1
+    print("$ " + shlex.join(argv), flush=True)
+    os.chdir(paths.workspace)
+    env = {**os.environ, **agent.env}
+    os.execvpe(argv[0], argv, env)
+
+
+def cmd_ask(args) -> int:
+    paths = _paths(args)
+    if args.history:
+        text = read_text(paths.answers).strip()
+        print(text or "No questions asked yet.")
+        return 0
+    question = " ".join(args.question).strip()
+    if question == "-":
+        question = sys.stdin.read().strip()
+    if not question:
+        print("bananavibe: ask what? e.g. bananavibe ask \"is it done? what is left?\"", file=sys.stderr)
+        return 2
+    cfg = _load(paths)
+    if args.agent and args.agent not in cfg.agents:
+        print(f"bananavibe: unknown agent {args.agent}", file=sys.stderr)
+        return 2
+    ok, answer = ask(paths, cfg, question, args.agent, verbose=not args.quiet)
+    print(answer)
+    return 0 if ok else 1
+
+
+def cmd_export(args) -> int:
+    paths = _paths(args)
+    cfg = _load(paths)
+    if supervisor_pid(paths):
+        if not args.stop:
+            print("The supervisor is running. Stop it first (`bananavibe stop --now`), or pass --stop.",
+                  file=sys.stderr)
+            return 1
+        set_control(paths, stop_now=True)
+        _signal_supervisor(paths)
+        print("Stopping the supervisor (the current session is interrupted and will be continued)...")
+        if not _wait_stopped(paths, 600):
+            print("It did not stop within 10 minutes.", file=sys.stderr)
+            return 1
+    output = Path(args.output or f"{_session_name(cfg.name)}-{now():%Y%m%d-%H%M}.tar.gz").expanduser().resolve()
+    try:
+        manifest = handover.export(paths, cfg, output, include_logs=not args.no_logs)
+    except handover.HandoverError as e:
+        print(f"bananavibe: {e}", file=sys.stderr)
+        return 1
+    size = output.stat().st_size / 1e6
+    print(f"Exported '{cfg.name}' ({len(manifest['repos'])} repositories, {size:.1f} MB) to {output}")
+    print("On the other machine:")
+    print(f"  bananavibe import {output.name} -w <workspace> && bananavibe -w <workspace> doctor && "
+          "bananavibe -w <workspace> start")
+    print("Uncommitted ignored files (dependencies, build output, local data) are not included.")
+    return 0
+
+
+def cmd_import(args) -> int:
+    paths = _paths(args)
+    archive = Path(args.archive).expanduser().resolve()
+    if supervisor_pid(paths):
+        print("A supervisor is running in the target workspace; stop it first.", file=sys.stderr)
+        return 1
+    try:
+        done = handover.import_run(archive, paths.workspace, force=args.force)
+    except (handover.HandoverError, OSError) as e:
+        print(f"bananavibe: {e}", file=sys.stderr)
+        return 1
+    for line in done:
+        print("  " + line)
+    state = State(paths)
+    print(f"Imported into {paths.workspace}: status {state['status']}, {state['iteration']} sessions done"
+          + (f", an interrupted {state['interrupted']['label']} session will be continued"
+             if state["interrupted"] else "") + ".")
+    print("Check that the agents are installed and logged in here (`bananavibe doctor --live`), then "
+          "`bananavibe start`.")
+    return 0
+
+
 # ------------------------------------------------------------------ doctor
 
 def cmd_doctor(args) -> int:
@@ -322,9 +568,8 @@ def cmd_doctor(args) -> int:
     ok = True
     print(f"BananaVibe {__version__}, Python {sys.version.split()[0]}, running as "
           f"{'root' if os.geteuid() == 0 else os.environ.get('USER', 'user')}")
-    for tool in ("git", "tmux"):
-        print(f"  {'✔' if shutil.which(tool) else '✖'} {tool}")
-        ok &= bool(shutil.which(tool)) or tool == "tmux"
+    print(f"  {'✔' if shutil.which('git') else '✖'} git")
+    ok &= bool(shutil.which("git"))
     repos = gitops.discover(paths.workspace, cfg.git_repos)
     print(f"  {'✔' if repos else '✖'} repositories: {', '.join(str(r) for r in repos) or 'none'}")
     goal = read_text(paths.goal)
@@ -333,7 +578,7 @@ def cmd_doctor(args) -> int:
         ok = False
     if not cfg.checks:
         print("  ! no [[checks]] configured: only the reviewer will verify the work")
-    used = list(dict.fromkeys([*cfg.workers, cfg.reviewer_name]))
+    used = list(dict.fromkeys([*cfg.workers, cfg.reviewer_name, cfg.asker_name]))
     for name in used:
         agent = cfg.agents[name]
         exe = shutil.which(agent.command[0]) if agent.command else None
@@ -393,12 +638,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--again", action="store_true", help="continue a finished run")
     s.add_argument("--no-keep-alive", dest="keep_alive", action="store_false",
                    help="exit instead of restarting when the supervisor itself crashes")
+    s.add_argument("--daemon", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(func=cmd_run)
 
-    s = sub.add_parser("start", help="run the supervisor in a detached tmux session")
+    s = sub.add_parser("start", help="run the supervisor in the background (survives logging out)")
     s.add_argument("--again", action="store_true", help="continue a finished run")
+    s.add_argument("--tmux", action="store_true", help="run it in a detached tmux session instead")
     s.set_defaults(func=cmd_start)
-    sub.add_parser("attach", help="attach to the tmux session").set_defaults(func=cmd_attach)
+
+    s = sub.add_parser("attach", help="watch live: supervisor events and the agent's full transcript")
+    s.add_argument("--raw", action="store_true", help="the agent's raw event stream (JSON lines)")
+    s.add_argument("--full", action="store_true", help="don't shorten tool output")
+    s.add_argument("--max-lines", type=int, default=25, help="lines shown per tool output (default 25)")
+    s.add_argument("--history", type=int, default=60, help="earlier transcript lines shown first (default 60)")
+    s.add_argument("--tmux", action="store_true", help="attach to the tmux session of `start --tmux`")
+    s.set_defaults(func=cmd_attach)
 
     s = sub.add_parser("status", help="show progress")
     s.add_argument("--json", action="store_true")
@@ -406,15 +660,57 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("stop", help="stop after the current session")
-    s.add_argument("--now", action="store_true", help="interrupt the current session (its work is kept)")
+    s.add_argument("--now", action="store_true", help="interrupt the current session (its work is kept and the "
+                                                     "next start continues it)")
+    s.add_argument("--wait", action="store_true", help="wait until the supervisor has exited")
+    s.add_argument("--wait-timeout", type=float, default=600, help=argparse.SUPPRESS)
     s.set_defaults(func=cmd_stop)
-    sub.add_parser("pause", help="pause after the current session").set_defaults(func=cmd_pause)
-    sub.add_parser("resume", help="resume a paused run").set_defaults(func=cmd_resume)
+    s = sub.add_parser("pause", help="pause after the current session")
+    s.add_argument("--now", action="store_true", help="interrupt the current session now; resume continues it")
+    s.set_defaults(func=cmd_pause)
+    s = sub.add_parser("resume", help="resume a paused run")
+    s.add_argument("--start", action="store_true", help="start the supervisor in the background if it isn't running")
+    s.set_defaults(func=cmd_resume)
     sub.add_parser("retry-now", help="skip the current limit/backoff wait").set_defaults(func=cmd_retry_now)
 
     s = sub.add_parser("say", help="send instructions to the next session ('-' reads stdin)")
     s.add_argument("message", nargs="+")
     s.set_defaults(func=cmd_say)
+
+    s = sub.add_parser("ask", help="ask a question about the run and get an answer (running or finished)")
+    s.add_argument("question", nargs="*", help="the question ('-' reads stdin)")
+    s.add_argument("--agent", default="", help="agent to ask (default: [run].asker, else the reviewer)")
+    s.add_argument("-q", "--quiet", action="store_true", help="print only the answer")
+    s.add_argument("--history", action="store_true", help="show earlier questions and answers")
+    s.set_defaults(func=cmd_ask)
+
+    s = sub.add_parser("sessions", help="list agent sessions with their agent session ids")
+    s.add_argument("-n", "--limit", type=int, default=30)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_sessions)
+
+    s = sub.add_parser("show", help="print a session's full transcript")
+    s.add_argument("session", nargs="?", default="latest", help="# from `sessions`, an id prefix, or latest")
+    s.add_argument("--raw", action="store_true")
+    s.add_argument("--full", action="store_true", help="don't shorten tool output")
+    s.add_argument("--max-lines", type=int, default=25)
+    s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("open", help="open a session in the agent's own interactive UI (claude --resume, ...)")
+    s.add_argument("session", nargs="?", default="latest", help="# from `sessions`, an id prefix, or latest")
+    s.add_argument("--force", action="store_true", help="open it even if it is running now")
+    s.set_defaults(func=cmd_open)
+
+    s = sub.add_parser("export", help="pack the run (state + git bundles) to continue it on another machine")
+    s.add_argument("-o", "--output", default="", help="archive path (default: bananavibe-<name>-<time>.tar.gz)")
+    s.add_argument("--stop", action="store_true", help="stop a running supervisor first (stop --now)")
+    s.add_argument("--no-logs", action="store_true", help="leave session logs out (smaller archive)")
+    s.set_defaults(func=cmd_export)
+
+    s = sub.add_parser("import", help="restore an exported run into the workspace (-w), then `start`")
+    s.add_argument("archive")
+    s.add_argument("--force", action="store_true", help="replace an existing run / branch in the workspace")
+    s.set_defaults(func=cmd_import)
 
     sub.add_parser("report", help="print a fresh progress report").set_defaults(func=cmd_report)
 

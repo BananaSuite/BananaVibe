@@ -19,8 +19,11 @@ BananaVibe is a small supervisor that sits on top of those agents and doesn't le
 - **It never gives up on errors.** Usage limits wait for the reset time (parsed from the agent's own messages),
   outages and crashes back off and retry, logouts are retried until you log in again, and work done before a
   failure is committed. With several agents configured, it fails over to whichever one is available.
-- **It runs unattended.** Start it in tmux on a server, check `bananavibe status` from your phone, read the
-  checkpoint reports, send instructions with `bananavibe say`, pause, resume or stop it.
+- **It runs unattended, and you stay in control.** `bananavibe start` runs it in the background on a server (no
+  tmux needed). Watch the agent's full live transcript with `bananavibe attach`, ask questions with
+  `bananavibe ask "is it done?"` and get answers while it runs or after it ends, steer it with `bananavibe say`,
+  pause or stop it now (the interrupted session is continued later), and move a run to another machine with
+  `bananavibe export` / `import`.
 
 It works with any project and any goal: implementing features, getting to production readiness, refactoring,
 raising test coverage, migrations, documentation. One workspace can hold several repositories.
@@ -51,7 +54,7 @@ approving. That gap is what BananaVibe exists for.
 
 ## Requirements
 
-- Linux or macOS, Python 3.11+ (standard library only, nothing else to install), git, tmux (optional).
+- Linux or macOS, Python 3.11+ (standard library only, nothing else to install), git.
 - At least one agent CLI, installed and logged in:
   [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`),
   [Codex CLI](https://github.com/openai/codex) (`codex`) or [OpenCode](https://opencode.ai) (`opencode`).
@@ -77,21 +80,43 @@ bananavibe init --workers claude,codex --reviewer codex \
 $EDITOR .bananavibe/GOAL.md     # describe the mission and the definition of done
 $EDITOR .bananavibe/config.toml # models, checks, cadence
 bananavibe doctor --live        # verifies every agent answers
-bananavibe start                # runs in a detached tmux session
+bananavibe start                # runs in the background; survives logging out
 ```
 
 Then walk away. Later:
 
 ```bash
 bananavibe status               # what it's doing, plan, checks, limits, usage (tokens, cost, Claude windows)
-bananavibe attach               # watch live (detach: Ctrl-b d)
+bananavibe attach               # live transcript: messages, thinking, every command and its output (Ctrl-C quits)
+bananavibe ask "Is it done? If not, what is left and what is blocking it?"
 cat .bananavibe/reports/latest.md
 bananavibe say "Prioritise the API over the UI, and don't touch the database schema."
-bananavibe pause | resume | stop [--now] | retry-now
+bananavibe pause [--now] | resume | stop [--now] | retry-now
+bananavibe sessions             # every session with its agent session id
+bananavibe open 12              # open session 12 in the agent's own UI (claude --resume <id>, codex resume <id>)
 ```
 
 Everything the agents did is committed on the `bananavibe/work` branch of each repository, one commit per
 session (plus their own commits), so `git log` and `git diff main` show exactly what changed.
+
+## Watching, asking, pausing, moving
+
+- **See what it is doing.** `bananavibe attach` follows the supervisor and the running agent's full transcript:
+  its messages and thinking, every tool call with its input, and the output (`--full` for untruncated output,
+  `--raw` for the raw event stream). `bananavibe show <#>` prints any past session; `bananavibe open <#>` opens
+  it in the agent's own interactive UI, to inspect it or carry on by hand.
+- **Ask questions.** `bananavibe ask "…"` hands your question to a separate, read-only agent session together
+  with the run's state, plan, latest handoffs, review and live activity, and prints the answer. It works while
+  the run is going (the loop is not disturbed), paused, stopped or finished. Answers are kept in
+  `.bananavibe/ANSWERS.md` and follow-ups see the earlier ones (`bananavibe ask --history`).
+- **Pause or stop right now.** `bananavibe pause --now` and `bananavibe stop --now` interrupt the agent
+  mid-session, commit what it did so far, and remember the session. `resume` (or the next `start`) continues
+  it: Claude Code resumes the very same conversation; other agents get a fresh session told exactly what the
+  interrupted one was doing. Without `--now` they act after the current session ends.
+- **Continue on another machine.** `bananavibe export --stop -o run.tar.gz` packs the run (state, memory files,
+  reports, logs and a git bundle of every repository); on the new machine `bananavibe -w ~/work import
+  run.tar.gz && bananavibe -w ~/work start` continues where it stopped, interrupted session included. Moving it
+  back works the same way (`import --force` over the old copy).
 
 ## How a run works
 
@@ -138,7 +163,7 @@ session (plus their own commits), so `git log` and `git diff main` show exactly 
 | Logged out / bad key / bad model | Retried every `auth_seconds` / `max_seconds`; status and `notify` say what to fix |
 | Work done before a failure | Committed as `cut off: <reason>` and journaled |
 | Supervisor itself crashes | `bananavibe run` restarts it (state is on disk) |
-| Server reboots | Run `bananavibe start` again (or use the systemd unit in [docs/server.md](docs/server.md)); it resumes from the state on disk |
+| Server reboots | Run `bananavibe start` again (or use the systemd unit in [docs/server.md](docs/server.md)); it resumes from the state on disk, continuing an interrupted session |
 
 ## Configuration
 

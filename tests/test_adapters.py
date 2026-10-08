@@ -170,3 +170,61 @@ def test_invocations(tmp_path: Path):
     assert inv.stdin is None and str(pf) in inv.argv[-1] and "--auto" in inv.argv
     inv = make_adapter(AgentConfig("x", "custom", ["tool", "--file", "{prompt_file}"])).invocation("hi", pf, tmp_path)
     assert inv.argv == ["tool", "--file", str(pf)]
+
+
+def test_session_ids_are_captured():
+    from bananavibe.adapters import ClaudeParser, OpenCodeParser
+    p = ClaudeParser()
+    p.feed(json.dumps({"type": "system", "subtype": "init", "session_id": "s-123"}))
+    assert p.session_id == "s-123"
+    c = CodexParser()
+    c.feed(json.dumps({"type": "thread.started", "thread_id": "t-9"}))
+    assert c.session_id == "t-9"
+    o = OpenCodeParser()
+    o.feed(json.dumps({"type": "text", "sessionID": "ses_1", "part": {"text": "hi"}}))
+    assert o.session_id == "ses_1"
+
+
+def test_read_only_and_resume_invocations(tmp_path):
+    pf = tmp_path / "p.md"
+    claude = ClaudeAdapter(AgentConfig("claude", "claude", ["claude"]))
+    ro = claude.invocation("hi", pf, tmp_path, read_only=True).argv
+    assert "--dangerously-skip-permissions" not in ro and "--allowedTools" in ro
+    assert "Edit,Write,NotebookEdit" in ro and not any(t.startswith("Bash(rm") for t in ro)
+    rw = claude.invocation("hi", pf, tmp_path, resume_id="s-1").argv
+    assert rw[:3] == ["claude", "-p", "--dangerously-skip-permissions"]
+    assert rw[rw.index("--resume") + 1] == "s-1"
+    assert claude.open_command("s-1", tmp_path) == ["claude", "--resume", "s-1"]
+    codex = CodexAdapter(AgentConfig("codex", "codex", ["codex"]))
+    ro = codex.invocation("hi", pf, tmp_path, read_only=True).argv
+    assert "--dangerously-bypass-approvals-and-sandbox" not in ro
+    assert ro[ro.index("--sandbox") + 1] == "read-only"
+    assert "--auto" not in OpenCodeAdapter(AgentConfig("o", "opencode", ["opencode"])).invocation(
+        "hi", pf, tmp_path, read_only=True).argv
+
+
+def test_plain_text_agents_final_message():
+    p = make_adapter(AgentConfig("x", "custom", ["tool", "{prompt}"])).parser()
+    for line in ["working...", "ANSWER: yes"]:
+        p.feed(line)
+    assert p.finish(0).final_text.endswith("ANSWER: yes")
+
+
+def test_transcript_renderer_shows_thinking_tools_and_output():
+    from bananavibe.watch import Renderer, Style, agent_from_log
+    r = Renderer("claude", Style(False), max_lines=3)
+    out = r.render(json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "thinking", "thinking": "Let me look at the tests."},
+        {"type": "tool_use", "name": "Bash", "input": {"command": "pytest -q"}},
+        {"type": "text", "text": "Running the tests."}]}}))
+    assert out == ["💭 Let me look at the tests.", "🔧 Bash $ pytest -q", "💬 Running the tests."]
+    out = r.render(json.dumps({"type": "user", "message": {"content": [
+        {"type": "tool_result", "content": "\n".join(f"line {i}" for i in range(10))}]}}))
+    assert out[0] == "   ↳ line 0" and "7 more line(s)" in out[-1]
+    c = Renderer("codex", Style(False))
+    out = c.render(json.dumps({"type": "item.completed", "item": {
+        "type": "command_execution", "command": "ls", "aggregated_output": "a\nb", "exit_code": 2}}))
+    assert out[0] == "   ↳ a" and out[-1].strip() == "exit 2"
+    assert agent_from_log("0003-work-my-agent-20261008-101500.log") == "my-agent"
+    assert agent_from_log("0003-review-final-codex-20261008-101500.log") == "codex"
+    assert agent_from_log("supervisor.log") == ""

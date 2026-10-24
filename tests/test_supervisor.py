@@ -168,9 +168,10 @@ def test_sigterm_interrupts_and_keeps_work(workspace):
     (workspace / "wip.txt").write_text("work in progress\n")
     time.sleep(1)
     proc.send_signal(signal.SIGTERM)
-    assert proc.wait(timeout=60) == 0
+    # Terminated from outside without an operator stop: the exit code asks a service manager to restart it.
+    assert proc.wait(timeout=60) == 75
     st = State(Paths(workspace))
-    assert st["status"] == "stopped"
+    assert st["status"] == "stopped" and not st["operator_stop"]
     assert "wip.txt" in subprocess.run(["git", "-C", str(workspace), "ls-files"],
                                        capture_output=True, text=True).stdout
     status = subprocess.run([sys.executable, "-m", "bananavibe", "-w", str(workspace), "status", "--json"],
@@ -206,8 +207,11 @@ def test_force_added_run_files_are_untracked(workspace):
     paths = configure(workspace, ["sneak", "finish", "approve"])
     code, _ = run_supervisor(paths)
     assert code == 0
+    history = subprocess.run(["git", "-C", str(workspace), "log", "--name-only", "--format="], capture_output=True,
+                             text=True).stdout
+    assert ".bananavibe/PLAN.md" in history  # the agent did get it into the history...
     files = subprocess.run(["git", "-C", str(workspace), "ls-files"], capture_output=True, text=True).stdout
-    assert ".bananavibe" not in files
+    assert ".bananavibe" not in files  # ...and the next snapshot took it out again
 
 
 def test_background_process_holding_output_does_not_look_like_a_hang(workspace):

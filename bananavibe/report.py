@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 from bananavibe import gitops
@@ -70,3 +71,47 @@ def write(paths: Paths, cfg: Config, state: State, repos: list[Path], title: str
     write_atomic(path, text)
     write_atomic(paths.reports / "latest.md", text)
     return path
+
+
+def digest(paths: Paths, cfg: Config, state: State, repos: list[Path], hours: float) -> str:
+    """A short progress update for notifications: where the run is and what happened recently."""
+    d = state.data
+    stats = plan_stats(read_text(paths.plan))
+    started = parse_iso(d["started_at"])
+    end = parse_iso(d["finished_at"]) or now()
+    lines = [f"{d['status']}: {d['detail']}"[:300]]
+    if started:
+        lines.append(f"Running for {human_duration((end - started).total_seconds())}; "
+                     f"{d['iteration']} sessions completed.")
+    cur = d.get("current") or {}
+    cur_start = parse_iso(cur.get("started"))
+    if cur and cur_start:
+        lines.append(f"Now: {cur.get('label')} session with {cur.get('agent')} for "
+                     f"{human_duration((now() - cur_start).total_seconds())}.")
+    if stats.total:
+        lines.append(f"Plan: {stats.done}/{stats.total} done ({stats.finished_fraction:.0%}), {stats.open} open, "
+                     f"{stats.blocked} blocked.")
+    if d["last_checks"]:
+        lines.append("Checks: " + ", ".join(f"{c['name']} {'PASS' if c['ok'] else 'FAIL'}" for c in d["last_checks"]))
+    if d["approvals"]:
+        lines.append(f"Reviewer approvals: {d['approvals']}/{cfg.done_approvals}.")
+    if hours:
+        since = now() - dt.timedelta(hours=hours)
+        recent = [h for h in d["history"] if (parse_iso(h.get("started")) or since) > since]
+        ok = sum(1 for h in recent if h.get("outcome") == "ok")
+        commits = sum(gitops.commits_after(r, since.isoformat(timespec="seconds")) for r in repos)
+        lines.append(f"Last {hours:g}h: {ok} sessions completed ({len(recent)} attempts), {commits} commits.")
+    cooling = []
+    for name, a in d["agents"].items():
+        until = parse_iso(a.get("cooldown_until"))
+        if until and until > now():
+            cooling.append(f"{name} until {until:%a %H:%M}")
+    if cooling:
+        lines.append("Waiting on limits: " + ", ".join(cooling) + ".")
+    journal = read_text(paths.journal)
+    if journal.strip():
+        last = journal.split("\n## ")[-1].strip().removeprefix("## ")
+        head, _, body = last.partition("\n")
+        body = body.strip()
+        lines.append(f"Latest handoff ({head.strip()}):\n{body[:700]}{'…' if len(body) > 700 else ''}")
+    return "\n".join(lines)

@@ -8,18 +8,31 @@ A run lives in `.bananavibe/` inside the workspace:
 | `GOAL.md` | you | the mission and its definition of done; agents must not edit it |
 | `PLAN.md` | agents | master checklist: `- [ ]` open, `- [x]` done, `- [!]` blocked, `- [~]` dropped |
 | `NOTES.md` | agents | durable knowledge: how to build and test, decisions, gotchas |
-| `JOURNAL.md` | supervisor | every session's handoff, in order |
+| `JOURNAL.md` | supervisor | every session's handoff, in order (older entries move to `JOURNAL.archive.md` past 4 MB) |
 | `HANDOFF.md`, `DONE.md`, `REVIEW.md` | agents | per-session handoff, done claim, reviewer verdict (consumed by the supervisor) |
 | `FEEDBACK.md` | supervisor | what the next session must address first |
-| `INBOX.md` | `bananavibe say` | your messages for the next session |
-| `ANSWERS.md` | `bananavibe ask` | your questions and the answers you got |
-| `state.json`, `control.json` | supervisor / CLI | run state (including every session and its agent session id) and pending commands |
-| `logs/` | supervisor | `supervisor.log`, `supervisor.out` (background process output), one raw log per session, check output, `ask/` |
-| `reports/` | supervisor | checkpoint and final reports (`latest.md`), archived reviews and done claims |
+| `inbox/` | `bananavibe say` | your messages, one file each, until a session has completed with them (then `inbox/delivered/` and `INBOX.archive.md`). A legacy `INBOX.md` is still picked up |
+| `ANSWERS.md` | `bananavibe ask` / `chat` | your questions and the answers you got |
+| `state.json` (+ `state.json.bak`), `control.json` | supervisor / CLI | run state (every session and its agent session id, the session in progress, post-session steps still to do, feedback) and pending commands |
+| `heartbeat.json`, `guardian.json` | supervisor / guardian | liveness, used by the watchdog and `status` |
+| `reverted/` | supervisor | versions of `GOAL.md` / `config.toml` changed without `bananavibe edit`/`reload`, after being restored |
+| `service.json`, `service.env` | `bananavibe start` / `service` | the autostart set up on this machine; `service.env` holds extra environment for it (API keys...). For cron, the script it runs is `autostart.sh` in the backup directory described below |
+| `logs/` | supervisor | `supervisor.log` (rotated at 64 MB), `supervisor.out` (background process output), one raw log per session (older ones gzip-compressed), check output, `ask/`, `autostart.log` |
+| `reports/` | supervisor | checkpoint, verification and final reports (`latest.md`), periodic updates (`update-latest.md`), archived reviews and done claims |
 | `prompts/` | supervisor | the last prompt sent for each session type |
 
 When the workspace is itself a git repository, `.bananavibe/` is added to `.git/info/exclude`, so it never
-shows up in the project's history.
+shows up in the project's history. `.bananavibe/` also contains an empty git repository of its own (`.git`, a few
+KB), which makes `git clean -fdx` and `git stash --all` in the project leave it alone. If an agent deletes it anyway,
+the supervisor restores it: state, mission and config from memory, and plan, notes, journal, queued messages and
+pending commands (`control.json`) from a backup kept in `~/.local/state/bananavibe/<id>/` (or `$XDG_STATE_HOME`, or
+`BANANAVIBE_STATE_DIR`; autostart pins the directory it was set up with). Operator messages the deleting session
+received are given again to the next one. The backup also holds the state, `GOAL.md`, `config.toml` (as last
+approved) and `service.env`, so if the supervisor died too, its automatic restart (guardian, systemd or cron)
+rebuilds the run directory and continues; a run you stopped on purpose, or a finished one, is not brought back.
+`bananavibe init` in a workspace without a run starts a fresh backup (the previous one is kept once, as
+`backup.previous`). The locks that stop two supervisors from running the same workspace are held on a file in
+`.bananavibe/` and one in that directory.
 
 Every key below is optional. Unknown keys are rejected, so typos don't pass silently.
 
@@ -40,9 +53,15 @@ Every key below is optional. Unknown keys are rejected, so typos don't pass sile
 | `pause_at_checkpoint` | `false` | pause after each checkpoint report until `bananavibe resume` |
 | `done_approvals` | `2` | consecutive reviewer approvals needed to finish |
 | `stall_limit` | `3` | sessions without any change before the supervisor switches to another worker (and, if the plan is complete and checks pass, verifies the work as done) |
-| `resume_sessions` | `true` | after `pause --now` / `stop --now`, resume the interrupted agent conversation itself (Claude Code, same machine). Otherwise a fresh session is told what the interrupted one was doing |
-| `asker` | the reviewer | agent that answers `bananavibe ask` |
+| `resume_sessions` | `true` | continue an interrupted session (`pause --now`, `stop --now`, `say --now`, a supervisor restart, or a limit/outage after real work) in the agent's own conversation (Claude Code, same machine, or moved with `export`). Otherwise a fresh session is told what the interrupted one was doing |
+| `asker` | the reviewer | agent that answers `bananavibe ask` and `chat` |
 | `ask_timeout_minutes` | `15` | how long an answer may take |
+| `after_done` | `"wait"` | when the mission is approved: `wait` keeps the supervisor up and continues as soon as you send new instructions with `say`; `exit` ends it |
+| `autostart` | `true` | `bananavibe start` sets up starting the run at boot and whenever it is down: a systemd service (as root, or a user service with lingering) or cron entries. See [server.md](server.md) |
+| `watchdog_minutes` | `60` | the guardian restarts a supervisor whose main loop made no progress this long, or whose heartbeat stopped (`0` = off) |
+| `min_free_disk_mb` | `1024` | below this, old logs are pruned and the next session waits (up to 30 minutes at a time) |
+| `min_free_memory_mb` | `256` | below this (Linux `MemAvailable`), the next session waits (up to 30 minutes at a time) |
+| `agent_oom_score_adj` | `500` | Linux: agents get this OOM score adjustment, so under memory pressure the kernel kills an agent (which is retried) rather than the supervisor (`0` = leave it) |
 
 ## `[retry]`
 
@@ -52,10 +71,12 @@ Every key below is optional. Unknown keys are rejected, so typos don't pass sile
 | `max_seconds` | `1800` | backoff cap; also the retry interval for configuration errors such as a bad model name |
 | `limit_fallback_seconds` | `900` | retry interval for usage limits whose reset time could not be determined |
 | `auth_seconds` | `600` | retry interval while an agent is logged out |
+| `limit_recheck_seconds` | `3600` | a reset time read from an error message may be wrong: the agent is retried at least this often. Claude Code's own reset timestamps are trusted (`0` = always trust) |
 
-Nothing is ever retried a limited number of times: a run only ends when the mission is approved, when you stop it,
-or when `max_iterations` or `max_hours` is reached. Use `bananavibe retry-now` to skip a wait, for example after
-you log an agent back in.
+Nothing is ever retried a limited number of times: a run only ends when you stop it, when `max_iterations` or
+`max_hours` is reached, or (with `after_done = "exit"`) when the mission is approved. Use `bananavibe retry-now`
+to skip a wait, for example after you log an agent back in; it also overrides a low disk or memory wait for 30
+minutes.
 
 ## `[git]`
 
@@ -66,8 +87,12 @@ you log an agent back in.
 | `push` | `false` | push the work branch to `remote` after every snapshot |
 | `remote` | `"origin"` | |
 | `repos` | `[]` | repositories to manage, relative to the workspace. Empty = the workspace itself if it is a repository, plus every direct subfolder that is one |
+| `max_file_mb` | `50` | files larger than this are never committed by a snapshot (the agents are told to ignore or avoid them); `0` = no limit |
 
 Snapshot commits use the repository's configured identity, or `BananaVibe <bananavibe@localhost>` if there is none.
+If an agent leaves a repository on another branch, the supervisor switches it back to `branch` (carrying
+uncommitted changes) and tells the agents to merge their work. A merge or rebase left unfinished is reported to
+the agents, since nothing can be committed until it is resolved.
 
 ## `[[checks]]`
 
@@ -84,7 +109,9 @@ timeout_minutes = 30
 
 Good checks are strict and cheap enough to run often: test suites, type checkers, linters, a production build,
 an end-to-end smoke script. A check you write yourself and the agents can't edit (keep it outside the workspace)
-is the strongest guard against "it works on my machine" claims.
+is the strongest guard against "it works on my machine" claims. Checks run the project's code, which the agents
+wrote, so the same rules apply as after a session: changes to `GOAL.md` or `config.toml` made while they run are
+reverted, and a deleted `.bananavibe/` is restored.
 
 ## `[agents.<name>]`
 
@@ -136,11 +163,48 @@ built-ins.
 
 ## `[notify]`
 
-`command` is run with `bash -c` on `start`, `checkpoint`, `claim`, `done`, `stopped` and `attention` (logged out,
-bad configuration, supervisor crash), with `BANANAVIBE_EVENT`, `BANANAVIBE_MESSAGE`, `BANANAVIBE_RUN` and
-`BANANAVIBE_WORKSPACE` in the environment. For phone notifications with [ntfy](https://ntfy.sh):
+Optional. Events: `start`, `checkpoint`, `claim`, `done`, `stopped`, `attention` (logged out, bad configuration,
+low disk or memory, agents stalling, supervisor crash), `restart` (the guardian restarted the supervisor) and
+`update` (periodic progress). Notifications run in the background with timeouts, so a slow or broken channel never
+holds the run up.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `command` | `""` | run with `bash -c`, with `BANANAVIBE_EVENT`, `BANANAVIBE_MESSAGE`, `BANANAVIBE_RUN`, `BANANAVIBE_WORKSPACE`, `BANANAVIBE_HOST` (and `BANANAVIBE_REPORT`, a report's path) in the environment; killed after 60 s |
+| `url` | `""` | a webhook, POSTed to |
+| `format` | `"text"` | `text` (the message as the body and a `Title` header: [ntfy](https://ntfy.sh) and most bridges), `json` (`event`, `message`, `run`, `host`, `workspace`, `at`), `slack` or `discord` |
+| `headers` | `{}` | extra HTTP headers, e.g. `{ Authorization = "Bearer ..." }` |
+| `events` | `[]` | send only these events (`[]` = all) |
+| `repeat_minutes` | `360` | the same alert (e.g. "logged out") is repeated at most this often |
+| `update_every_hours` | `0` | send a short progress update (status, plan, checks, recent sessions and commits, the latest handoff) every N hours; also written to `reports/update-latest.md` |
+| `ping_url` | `""` | a "dead man's switch" ([healthchecks.io](https://healthchecks.io), Uptime Kuma, ...): POSTed every `ping_every_minutes` while the supervisor is alive and its loop healthy, so the service alerts you if the machine goes down |
+| `ping_every_minutes` | `5` | |
 
 ```toml
 [notify]
-command = 'curl -s -H "Title: BananaVibe $BANANAVIBE_RUN" -d "$BANANAVIBE_EVENT: $BANANAVIBE_MESSAGE" ntfy.sh/your-secret-topic'
+url = "https://ntfy.sh/your-secret-topic"
+update_every_hours = 6
+# or a command:
+# command = 'curl -s -H "Title: BananaVibe $BANANAVIBE_RUN" -d "$BANANAVIBE_EVENT: $BANANAVIBE_MESSAGE" ntfy.sh/your-secret-topic'
 ```
+
+## `[logs]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `max_mb` | `2048` | total size of `logs/`; past it, the oldest session logs, check logs and `ask` logs are deleted (`0` = keep everything) |
+| `compress_after` | `20` | session logs older than the newest N are gzip-compressed (`show`, `attach` and `ask` read them transparently) |
+
+## Changing the configuration while it runs
+
+`bananavibe edit config` (or `edit goal`) opens the file in your editor, validates it and applies it before the
+next session; the running session is not interrupted. During a session it opens the last approved version
+instead of the file on disk: if an agent changed the file, editing that would approve the agent's lines along
+with yours.
+
+Editing the files directly also works: changes made while no session (or the checks after it) is running are
+picked up before the next one. During a session or its checks, run `bananavibe reload` afterwards (`reload goal` or `reload config` for just one): it shows
+the diff against the approved version and asks before approving it (`--yes` skips the question; without a
+terminal it is required),
+since a change found right after a session is otherwise treated as the agent's and reverted (your version is kept
+in `.bananavibe/reverted/`). An invalid `config.toml` is never applied: the previous configuration stays in force.

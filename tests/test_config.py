@@ -23,6 +23,9 @@ def test_template_parses(tmp_path: Path):
 def test_defaults(tmp_path: Path):
     cfg = parse({}, tmp_path)
     assert cfg.workers == ["claude"] and cfg.reviewer_name == "claude" and "claude" in cfg.agents
+    # Long-run safety defaults: never exit after done, restart at boot, guard the machine's resources.
+    assert cfg.after_done == "wait" and cfg.autostart and cfg.watchdog_minutes > 0
+    assert cfg.agent_oom_score_adj > 0 and cfg.min_free_disk_mb > 0 and cfg.logs_max_mb > 0
 
 
 @pytest.mark.parametrize("data,message", [
@@ -32,6 +35,16 @@ def test_defaults(tmp_path: Path):
     ({"checks": [{"name": "x"}]}, "needs a 'run'"),
     ({"agents": {"mine": {"type": "custom", "command": ["tool"]}}}, "{prompt}"),
     ({"run": {"max_iterations": "5"}}, "must be of type"),
+    ({"run": {"after_done": "sleep"}}, "after_done"),
+    ({"run": 5}, "must be a table"),
+    ({"notify": {"url": "ftp://x"}}, "http"),
+    ({"notify": {"format": "xml"}}, "format"),
+    ({"notify": {"events": ["done", "party"]}}, "unknown event"),
+    ({"notify": {"headers": {"A": 1}}}, "table of strings"),
+    ({"agents": {"../evil": {"type": "custom", "command": ["x", "{prompt}"]}}}, "may only contain"),
+    ({"logs": {"max_mb": -1}}, "negative"),
+    ({"retry": {"initial_seconds": 0}}, "positive"),
+    ({"checks": [{"run": "x", "timeout_minutes": 0}]}, "timeout_minutes"),
 ])
 def test_errors(tmp_path: Path, data, message):
     with pytest.raises(ConfigError, match=message.replace("{", r"\{").replace("}", r"\}")):

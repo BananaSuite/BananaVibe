@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from bananavibe.config import Config
-from bananavibe.state import Paths, plan_stats
-from bananavibe.util import read_text, tail
+from bananavibe.state import Message, Paths, plan_stats
+from bananavibe.util import parse_iso, read_text, tail
 
 
 def _journal_tail(paths: Paths, entries: int = 3, max_chars: int = 8000) -> str:
@@ -61,25 +61,48 @@ RULES = """\
 5. **Save as you go.** Commit with clear messages after each meaningful step (the supervisor also snapshots your work
    after the session). Keep `{notes}` up to date with knowledge the next session needs: how to run things, gotchas,
    decisions.
-6. **Hand off.** Before your session ends, overwrite `{handoff}` with: what you did, what state things are in, what is
+6. **Messages while you work.** The operator can send you messages during your session: they appear as new files
+   in `{inbox}/` (`ls {inbox}/*.md`). Between tasks (at least after every plan item), check for files other than
+   the ones quoted above; if there is one, read it and follow it: it overrides the plan. Leave those files in place.
+7. **Hand off.** Before your session ends, overwrite `{handoff}` with: what you did, what state things are in, what is
    unverified or broken, and the exact next steps. The next session starts with a fresh context and depends on it.
-7. **Declaring done.** Only when every plan item is ticked or justifiably dropped, the mission is met end-to-end, and
+8. **Declaring done.** Only when every plan item is ticked or justifiably dropped, the mission is met end-to-end, and
    you have run every check yourself, write `{done}` with the evidence (commands run and their results). The
    supervisor then runs the checks and an independent reviewer audits the work against the mission. Premature claims
    are rejected and cost a whole cycle, so be honest. If there is still work, do not write it.
-8. **Boundaries.** Do not edit `{goal}`, `.bananavibe/config.toml` or `.bananavibe/state.json`. Never commit
-   `.bananavibe/` to any repository (it is excluded on purpose) and do not change git configuration. Keep long-running
+9. **Boundaries.** Do not edit `{goal}`, `.bananavibe/config.toml` or `.bananavibe/state.json`. Never commit
+   `.bananavibe/` to any repository (it is excluded on purpose), never delete, move or clean it (it is the run's
+   memory: no `rm -rf .bananavibe`, no `git clean -x` without `-e .bananavibe`), and do not change git configuration. Keep long-running
    processes (dev servers, watchers) in the background and stop them when finished; always use timeouts for commands
    that might hang. Everything you started is killed when your session ends, so never end a session to "wait" for a
-   background job: wait for it and use its result now. {push_rule}
+   background job: wait for it and use its result now. Stop only processes you started, by PID: never use broad
+   commands such as `pkill python`, `killall node` or `kill -9 -1`, which can hit the supervisor running you.
+   {push_rule}
 """
 
 
+def _messages_block(messages: list[Message], last_session: dict | None) -> str:
+    started = parse_iso((last_session or {}).get("started"))
+    ended = parse_iso((last_session or {}).get("ended"))
+    parts = []
+    for m in messages:
+        at = parse_iso(m.at)
+        note = ""
+        if at and started and ended and started <= at <= ended:
+            note = (" _(sent while the previous session was running: it may already have acted on it; check the "
+                    "journal and the files before redoing anything)_")
+        parts.append(f"### {m.at.replace('T', ' ')[:16]} · `{m.id}`{note}\n\n{m.text.strip()}")
+    return tail("\n\n".join(parts), 12000)
+
+
 def worker_prompt(cfg: Config, paths: Paths, repos: list[Path], iteration: int, agent: str,
-                  feedback: str, inbox: str, last_checks: list[dict]) -> str:
+                  feedback: str, messages: list[Message] | str, last_checks: list[dict],
+                  last_session: dict | None = None) -> str:
     goal = read_text(paths.goal).strip() or "(GOAL.md is empty: improve the project in the workspace.)"
     stats = plan_stats(read_text(paths.plan))
     rel = paths.rel
+    if isinstance(messages, str):
+        messages = [Message("message", "", messages)] if messages.strip() else []
     push_rule = ("You may push to remotes when the mission requires it." if cfg.allow_push else
                  "Do not push to remotes, publish packages or deploy anything; the operator reviews and ships.")
     plan_line = (f"Plan progress: {stats.done} done, {stats.open} open, {stats.blocked} blocked, "
@@ -100,13 +123,15 @@ def worker_prompt(cfg: Config, paths: Paths, repos: list[Path], iteration: int, 
     ]
     if feedback.strip():
         sections.append("# Supervisor feedback (address this first)\n\n" + tail(feedback.strip(), 12000))
-    if inbox.strip():
-        sections.append("# Messages from the operator (these take priority over the plan)\n\n" + tail(inbox.strip(), 6000))
+    if messages:
+        sections.append("# Messages from the operator (these take priority over the plan)\n\n"
+                        + _messages_block(messages, last_session))
     journal = _journal_tail(paths)
     if journal:
         sections.append("# Recent journal (handoffs from previous sessions)\n\n" + journal)
     sections.append(RULES.format(plan=rel(paths.plan), notes=rel(paths.notes), handoff=rel(paths.handoff),
-                                 done=rel(paths.done), goal=rel(paths.goal), push_rule=push_rule))
+                                 done=rel(paths.done), goal=rel(paths.goal), inbox=rel(paths.inbox_dir),
+                                 push_rule=push_rule))
     if cfg.prompt_extra.strip():
         sections.append("# Additional rules from the operator\n\n" + cfg.prompt_extra.strip())
     return "\n\n".join(sections) + "\n"

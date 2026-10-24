@@ -1,6 +1,8 @@
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,8 @@ from bananavibe.supervisor import Supervisor
 from bananavibe.util import Console
 
 FAKE = Path(__file__).with_name("fake_agent.py")
+# Locks and backups live outside workspaces (~/.local/state/bananavibe): keep the tests' out of the home dir.
+os.environ.setdefault("BANANAVIBE_STATE_DIR", tempfile.mkdtemp(prefix="bananavibe-test-state-"))
 
 
 @pytest.fixture
@@ -42,6 +46,10 @@ done_approvals = 1
 stall_limit = 2
 session_timeout_minutes = 2
 idle_timeout_minutes = 0.1
+after_done = "exit"
+autostart = false
+min_free_disk_mb = 0
+min_free_memory_mb = 0
 {extra}
 
 [retry]

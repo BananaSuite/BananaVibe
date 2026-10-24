@@ -21,14 +21,21 @@ review_at_checkpoint = true
 pause_at_checkpoint = false      # true = wait for `bananavibe resume` after each checkpoint report
 done_approvals = 2               # consecutive reviewer approvals needed to finish
 stall_limit = 3                  # sessions without progress before switching agent
-resume_sessions = true           # continue a session interrupted by `pause --now` / `stop --now` in the same conversation
-# asker = ""                     # agent that answers `bananavibe ask` ("" = the reviewer)
+resume_sessions = true           # continue an interrupted or cut-off session in the same conversation (Claude Code)
+# asker = ""                     # agent that answers `bananavibe ask` / `chat` ("" = the reviewer)
+after_done = "wait"              # when the mission is approved: "wait" for new instructions (`say`), or "exit"
+autostart = true                 # `start` sets up starting at boot and whenever the run is down (systemd or cron)
+watchdog_minutes = 60            # restart a supervisor whose main loop has been stuck this long (0 = off)
+min_free_disk_mb = 1024          # below this, clean old logs and wait before starting a session
+min_free_memory_mb = 256         # below this, wait before starting a session
+agent_oom_score_adj = 500        # Linux: the OOM killer takes an agent (retried) before the supervisor
 
 [retry]
 initial_seconds = 30             # backoff for outages and crashes, doubling up to max_seconds
 max_seconds = 1800
 limit_fallback_seconds = 900     # how often to retry a usage limit whose reset time is unknown
 auth_seconds = 600               # how often to retry while an agent is logged out
+limit_recheck_seconds = 3600     # re-check a limit at least this often even if its reset time looks later
 
 [git]
 snapshot = true                  # commit the work after every session
@@ -36,6 +43,7 @@ branch = "bananavibe/work"       # work branch in every repository ("" = stay on
 push = false                     # push the branch after every snapshot
 remote = "origin"
 repos = []                       # repositories to snapshot, relative to the workspace ([] = auto-detect)
+max_file_mb = 50                 # never commit files larger than this (build output, datasets...); 0 = no limit
 
 [prompt]
 allow_push = false               # whether agents may push, publish or deploy themselves
@@ -64,10 +72,23 @@ model = "{opencode_model}"       # provider/model, e.g. "anthropic/claude-opus-5
 # command = ["aider", "--yes-always", "--message-file", "{{prompt_file}}"]
 
 [notify]
-# Shell command run on start, checkpoint, done, stop and when attention is needed.
-# It receives BANANAVIBE_EVENT, BANANAVIBE_MESSAGE, BANANAVIBE_RUN and BANANAVIBE_WORKSPACE.
+# Optional. Events: start, checkpoint, claim, done, stopped, attention, update, restart.
+# A shell command; it receives BANANAVIBE_EVENT, BANANAVIBE_MESSAGE, BANANAVIBE_RUN, BANANAVIBE_WORKSPACE,
+# BANANAVIBE_HOST (and BANANAVIBE_REPORT for reports).
 # command = 'curl -s -d "$BANANAVIBE_RUN: $BANANAVIBE_MESSAGE" ntfy.sh/my-secret-topic'
 command = ""
+# ...and/or a webhook: format "text" (ntfy.sh and friends), "json", "slack" or "discord".
+# url = "https://ntfy.sh/my-secret-topic"
+# format = "text"
+# headers = {{ Authorization = "Bearer ..." }}
+# events = []                    # [] = all events
+update_every_hours = 0           # a short progress update every N hours (0 = off)
+# ping_url = "https://hc-ping.com/<uuid>"   # pinged every ping_every_minutes while the run is alive
+# ping_every_minutes = 5
+
+[logs]
+max_mb = 2048                    # old logs are deleted beyond this total size (0 = keep everything)
+compress_after = 20              # session logs older than the newest N are gzip-compressed
 """
 
 CHECK = """[[checks]]

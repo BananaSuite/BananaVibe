@@ -16,6 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bananavibe.config import AgentConfig
+from bananavibe.util import clean
 
 # Outcome kinds. Only "ok" counts as a finished session; everything else is retried.
 OK = "ok"
@@ -51,13 +52,6 @@ def _unit_seconds(unit: str) -> int | None:
     return UNITS.get(unit)
 
 
-def _next_clock_time(hour: int, minute: int, ref: dt.datetime) -> dt.datetime:
-    t = ref.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if t <= ref:
-        t += dt.timedelta(days=1)
-    return t
-
-
 def parse_retry_at(text: str, ref: dt.datetime | None = None) -> dt.datetime | None:
     """Find when a usage limit resets in an error message. Returns an aware datetime or None."""
     ref = ref or dt.datetime.now().astimezone()
@@ -90,35 +84,45 @@ def parse_retry_at(text: str, ref: dt.datetime | None = None) -> dt.datetime | N
         r"(?:\s*\((?P<tz>[A-Za-z_]+/[A-Za-z_/]+|UTC)\))?",
         text, re.I,
     )
-    if m and (m.group("ampm") or m.group("m")):
-        hour = int(m.group("h"))
-        minute = int(m.group("m") or 0)
-        ampm = (m.group("ampm") or "").lower().replace(".", "")
-        if ampm == "pm" and hour < 12:
-            hour += 12
-        elif ampm == "am" and hour == 12:
-            hour = 0
-        if hour > 23 or minute > 59:
-            return None
-        local_ref = ref
-        if m.group("tz"):
-            try:
-                local_ref = ref.astimezone(ZoneInfo("UTC" if m.group("tz") == "UTC" else m.group("tz")))
-            except (ZoneInfoNotFoundError, ValueError):
-                pass
+    if not (m and (m.group("ampm") or m.group("m"))):
+        return None
+    hour = int(m.group("h"))
+    minute = int(m.group("m") or 0)
+    ampm = (m.group("ampm") or "").lower().replace(".", "")
+    if ampm == "pm" and hour < 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return None
+    zone = None
+    if m.group("tz"):
+        try:
+            zone = ZoneInfo("UTC" if m.group("tz").upper() == "UTC" else m.group("tz"))
+        except (ZoneInfoNotFoundError, ValueError):
+            zone = None
+
+    def at(day: dt.date) -> dt.datetime:
+        # Build the wall-clock time in its own zone, so daylight saving time on that date is respected
+        # (carrying today's UTC offset to a date after a DST change would be an hour off).
+        naive = dt.datetime(day.year, day.month, day.day, hour, minute)
+        return naive.replace(tzinfo=zone) if zone else naive.astimezone()
+
+    local_ref = ref.astimezone(zone) if zone else ref.astimezone()
+    try:
         if m.group("mon"):
-            try:
-                month = dt.datetime.strptime(m.group("mon")[:3], "%b").month
-                year = int(m.group("year")) if m.group("year") else local_ref.year
-                t = local_ref.replace(year=year, month=month, day=int(m.group("day")), hour=hour, minute=minute,
-                                      second=0, microsecond=0)
-                if not m.group("year") and t < local_ref - dt.timedelta(days=1):
-                    t = t.replace(year=t.year + 1)
-                return t.astimezone()
-            except ValueError:
-                return None
-        return _next_clock_time(hour, minute, local_ref).astimezone()
-    return None
+            month = dt.datetime.strptime(m.group("mon")[:3], "%b").month
+            year = int(m.group("year")) if m.group("year") else local_ref.year
+            t = at(dt.date(year, month, int(m.group("day"))))
+            if not m.group("year") and t < ref - dt.timedelta(days=1):
+                t = at(dt.date(year + 1, month, int(m.group("day"))))
+            return t.astimezone()
+        t = at(local_ref.date())
+        if t <= ref:
+            t = at(local_ref.date() + dt.timedelta(days=1))
+        return t.astimezone()
+    except ValueError:
+        return None
 
 
 def classify_error(text: str) -> tuple[str, dt.datetime | None]:
@@ -141,10 +145,11 @@ class Outcome:
     retry_at: dt.datetime | None = None
     final_text: str = ""
     usage: dict = field(default_factory=dict)  # cost_usd, tokens, windows (subscription utilization)
+    retry_exact: bool = False                  # retry_at comes from the agent's structured data, not a message
 
 
 def _short(text: str, n: int = 160) -> str:
-    text = " ".join(str(text).split())
+    text = " ".join(clean(str(text)).split())
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
@@ -156,6 +161,7 @@ class StreamParser:
     def __init__(self) -> None:
         self.errors: list[str] = []
         self.raw_tail: list[str] = []
+        self.text_tail: list[str] = []  # lines that are not JSON events: the CLI's own messages and stderr
         self.final_text = ""
         self.finished_ok = False
         self.usage: dict = {}
@@ -163,48 +169,72 @@ class StreamParser:
         self.plain: list[str] = []
 
     def add_usage(self, cost: float | None = None, tokens: int = 0) -> None:
-        if isinstance(cost, (int, float)):
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             self.usage["cost_usd"] = self.usage.get("cost_usd", 0.0) + float(cost)
         if tokens:
             self.usage["tokens"] = self.usage.get("tokens", 0) + int(tokens)
 
     def finish(self, exit_code: int) -> Outcome:
         if self.plain_output and not self.final_text:
-            self.final_text = "\n".join(self.plain[-200:]).strip()
+            self.final_text = clean("\n".join(self.plain[-200:])).strip()
         out = self.outcome(exit_code)
         out.usage = dict(self.usage)
         return out
 
+    @staticmethod
+    def _keep(buf: list[str], line: str, n: int) -> None:
+        buf.append(line[:4000])
+        if len(buf) > n + n // 4:
+            del buf[: len(buf) - n]
+
     def feed(self, line: str) -> list[str]:
         """Consume one output line; return lines worth showing to a human."""
-        self.raw_tail.append(line)
-        if len(self.raw_tail) > 80:
-            del self.raw_tail[:20]
+        self._keep(self.raw_tail, line, 80)
         try:
             event = json.loads(line)
         except ValueError:
-            if self.plain_output:
-                self.plain.append(line)
-            return [_short(line)] if line.strip() else []
+            event = None
         if not isinstance(event, dict):
-            return []
+            # Plain text (or a bare number/word that happens to be valid JSON): the CLI's own output.
+            self._keep(self.text_tail, line, 60)
+            if self.plain_output:
+                self._keep(self.plain, line, 400)
+            return [_short(line)] if line.strip() else []
         if not self.session_id:
-            sid = (event.get("session_id") or event.get("sessionID") or (event.get("part") or {}).get("sessionID")
+            part = event.get("part") if isinstance(event.get("part"), dict) else {}
+            sid = (event.get("session_id") or event.get("sessionID") or part.get("sessionID")
                    or (event.get("thread_id") if event.get("type") == "thread.started" else None))
             if isinstance(sid, str) and sid:
                 self.session_id = sid
-        return self.on_event(event)
+        try:
+            return self.on_event(event)
+        except (AttributeError, TypeError, ValueError, KeyError):
+            # An event in a shape we don't know (a newer CLI version): never let it break the session.
+            return []
 
     def on_event(self, event: dict) -> list[str]:
         return []
 
+    def error_text(self) -> str:
+        """The text to classify when a session failed: explicit errors, else what the CLI printed itself.
+
+        The JSON event stream is deliberately left out for agents that have one: it contains the project's
+        own output (tests about rate limiting, "401" in an API's logs...), which must not be mistaken for the
+        agent's state.
+        """
+        if self.errors:
+            return "\n".join(self.errors)
+        if self.plain_output:
+            return "\n".join(self.raw_tail[-30:])
+        return "\n".join(self.text_tail[-30:])
+
     def outcome(self, exit_code: int) -> Outcome:
         if exit_code == 0 and not self.errors:
             return Outcome(OK, final_text=self.final_text)
-        text = "\n".join(self.errors) if self.errors else "\n".join(self.raw_tail[-30:])
-        kind, retry_at = classify_error(text)
         if exit_code == 0 and self.finished_ok:
             return Outcome(OK, final_text=self.final_text)
+        text = self.error_text()
+        kind, retry_at = classify_error(text)
         return Outcome(kind, _short(text, 600) or f"exit code {exit_code}", retry_at, self.final_text)
 
 
@@ -215,6 +245,9 @@ def _tool_hint(inp: dict) -> str:
     return ""
 
 
+_API_ERROR_TEXT = re.compile(r"^\s*(API Error\b|Claude AI usage limit reached|.{0,40}usage limit reached\|\d{10})", re.I)
+
+
 class ClaudeParser(StreamParser):
     plain_output = False
 
@@ -222,8 +255,16 @@ class ClaudeParser(StreamParser):
         t = ev.get("type")
         out: list[str] = []
         if t == "assistant":
+            api_error = bool(ev.get("error") or ev.get("isApiErrorMessage"))
             for block in (ev.get("message") or {}).get("content") or []:
+                if not isinstance(block, dict):
+                    continue
                 if block.get("type") == "text" and block.get("text", "").strip():
+                    if api_error or _API_ERROR_TEXT.match(block["text"]):
+                        # Claude Code reports API failures (limits, overload, logout) as a synthetic message.
+                        self.errors.append(block["text"])
+                        out.append("✖ " + _short(block["text"]))
+                        continue
                     self.final_text = block["text"]
                     out.append("💬 " + _short(block["text"]))
                 elif block.get("type") == "tool_use":
@@ -268,8 +309,9 @@ class ClaudeParser(StreamParser):
             # Claude Code tells us exactly when the window resets.
             resets = info.get("resetsAt")
             result.kind = LIMIT
-            if isinstance(resets, (int, float)):
+            if isinstance(resets, (int, float)) and not isinstance(resets, bool):
                 result.retry_at = dt.datetime.fromtimestamp(resets).astimezone()
+                result.retry_exact = True
         return result
 
 
@@ -288,7 +330,7 @@ class CodexParser(StreamParser):
                 return ["🔧 $ " + _short(item.get("command", ""), 140)]
             if kind == "file_change" and t == "item.completed":
                 paths = [c.get("path", "") for c in item.get("changes") or []]
-                return ["✏️  " + _short(", ".join(paths), 140)]
+                return ["✏ " + _short(", ".join(paths), 140)]
             if kind in ("mcp_tool_call", "web_search") and t == "item.started":
                 return [f"🔧 {kind} {_short(item.get('tool') or item.get('query') or '', 100)}"]
             if kind == "error" and t == "item.completed":

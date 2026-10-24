@@ -78,13 +78,13 @@ def test_background_start_and_stop_now_then_continue_after_restart(workspace):
     try:
         wait_for(lambda: (workspace / ".fake" / "prompt-000.md").exists())
         assert supervisor_pid(paths)
-        assert "Supervisor: pid" in cli(workspace, "status").stdout
+        assert "Supervisor  pid" in cli(workspace, "status").stdout
         # Via the control file only (as from another shell or machine that can't signal the process).
         set_control(paths, stop_now=True)
         wait_for(lambda: not supervisor_pid(paths))
         st = State(paths)
         assert st["status"] == "stopped" and st["interrupted"]["reason"] == "stop now"
-        assert "Continuing: interrupted work session" in cli(workspace, "status").stdout
+        assert "Continuing  interrupted work session" in cli(workspace, "status").stdout
 
         r = cli(workspace, "start")
         assert r.returncode == 0, r.stdout + r.stderr

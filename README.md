@@ -19,11 +19,14 @@ BananaVibe is a small supervisor that sits on top of those agents and doesn't le
 - **It never gives up on errors.** Usage limits wait for the reset time (parsed from the agent's own messages),
   outages and crashes back off and retry, logouts are retried until you log in again, and work done before a
   failure is committed. With several agents configured, it fails over to whichever one is available.
-- **It runs unattended, and you stay in control.** `bananavibe start` runs it in the background on a server (no
-  tmux needed). Watch the agent's full live transcript with `bananavibe attach`, ask questions with
-  `bananavibe ask "is it done?"` and get answers while it runs or after it ends, steer it with `bananavibe say`,
-  pause or stop it now (the interrupted session is continued later), and move a run to another machine with
-  `bananavibe export` / `import`.
+- **It never stops on its own.** A guardian process restarts the supervisor if it crashes, is killed (including by
+  the kernel's OOM killer) or hangs; `bananavibe start` also sets up starting at boot and whenever the run is down
+  (systemd or cron). Everything in flight is on disk, so a crash or reboot continues the interrupted session, with
+  your messages, the feedback and any done claim under review intact. Only you (or a budget you set) end a run.
+- **You can talk to it while it works.** `bananavibe chat` answers questions about the run and takes instructions;
+  `bananavibe say` reaches the running agent between its tasks, `say --now` immediately (the session continues in
+  the same conversation). `bananavibe dashboard` is a live full-screen view with keys to pause, resume, message
+  and ask. Pause or stop now and continue later, and move a run to another machine with `export` / `import`.
 
 It works with any project and any goal: implementing features, getting to production readiness, refactoring,
 raising test coverage, migrations, documentation. One workspace can hold several repositories.
@@ -79,18 +82,22 @@ bananavibe init --workers claude,codex --reviewer codex \
   --goal "Make every project in this folder production ready: ..."
 $EDITOR .bananavibe/GOAL.md     # describe the mission and the definition of done
 $EDITOR .bananavibe/config.toml # models, checks, cadence
-bananavibe doctor --live        # verifies every agent answers
-bananavibe start                # runs in the background; survives logging out
+bananavibe doctor --live        # verifies every agent answers, and what could stop a long run
+bananavibe start                # runs in the background, restarts itself, and comes back after a reboot
 ```
 
 Then walk away. Later:
 
 ```bash
+bananavibe dashboard            # live full-screen view: status, plan, checks, agents, transcript; keys to act
+bananavibe chat                 # ask questions and give instructions in one place, while it works
 bananavibe status               # what it's doing, plan, checks, limits, usage (tokens, cost, Claude windows)
 bananavibe attach               # live transcript: messages, thinking, every command and its output (Ctrl-C quits)
 bananavibe ask "Is it done? If not, what is left and what is blocking it?"
 cat .bananavibe/reports/latest.md
 bananavibe say "Prioritise the API over the UI, and don't touch the database schema."
+bananavibe say --now "Stop the refactor: the login is broken in production, fix that first."
+bananavibe edit goal | edit config     # change the mission or settings while it runs (applied before the next session)
 bananavibe pause [--now] | resume | stop [--now] | retry-now
 bananavibe sessions             # every session with its agent session id
 bananavibe open 12              # open session 12 in the agent's own UI (claude --resume <id>, codex resume <id>)
@@ -101,6 +108,17 @@ session (plus their own commits), so `git log` and `git diff main` show exactly 
 
 ## Watching, asking, pausing, moving
 
+- **Dashboard.** `bananavibe dashboard` (or `top`) shows the status, plan progress, checks, agents and limits,
+  recent events and the live transcript, refreshed every second, and lets you act with single keys: `p`/`P` pause
+  (after the session / now), `r` resume, `s`/`n` send a message (queued / now), `a` ask, `R` retry now, `x` stop,
+  `q` quit (the run keeps going).
+- **Talk to it.** `bananavibe chat` is a prompt where plain lines are questions (answered like `ask`, with the
+  conversation so far as context) and `/say`, `/now`, `/pause`, `/resume`, `/stop`, `/status`, `/log` act on the run.
+  Messages sent with `say` are visible to the running agent at once (agents check for new messages between tasks)
+  and are given to every next session until one has completed with them, so nothing you send is lost, even if a
+  session fails or the machine restarts. `say --now` interrupts the work session and continues it straight away
+  with your message (Claude Code: in the same conversation). `say --list` shows the queue, `say --cancel <id>`
+  withdraws a message.
 - **See what it is doing.** `bananavibe attach` follows the supervisor and the running agent's full transcript:
   its messages and thinking, every tool call with its input, and the output (`--full` for untruncated output,
   `--raw` for the raw event stream). `bananavibe show <#>` prints any past session; `bananavibe open <#>` opens
@@ -113,10 +131,15 @@ session (plus their own commits), so `git log` and `git diff main` show exactly 
   mid-session, commit what it did so far, and remember the session. `resume` (or the next `start`) continues
   it: Claude Code resumes the very same conversation; other agents get a fresh session told exactly what the
   interrupted one was doing. Without `--now` they act after the current session ends.
+- **Change the mission or settings while it runs.** `bananavibe edit goal` / `edit config` (or edit the files and
+  run `bananavibe reload goal|config`): the change applies before the next session, without interrupting the
+  current one.
+  Changes made by agents to `GOAL.md` or `config.toml` are reverted (a copy is kept in `.bananavibe/reverted/`).
 - **Continue on another machine.** `bananavibe export --stop -o run.tar.gz` packs the run (state, memory files,
-  reports, logs and a git bundle of every repository); on the new machine `bananavibe -w ~/work import
-  run.tar.gz && bananavibe -w ~/work start` continues where it stopped, interrupted session included. Moving it
-  back works the same way (`import --force` over the old copy).
+  reports, logs, a git bundle of every repository and, when a Claude Code session was interrupted, its
+  conversation); on the new machine `bananavibe -w ~/work import run.tar.gz && bananavibe -w ~/work start`
+  continues where it stopped, interrupted session included. The archive is checksummed and verified on import.
+  Moving it back works the same way (`import --force` over the old copy). The old machine won't restart it.
 
 ## How a run works
 
@@ -150,7 +173,9 @@ session (plus their own commits), so `git log` and `git diff main` show exactly 
    Otherwise the reviewer audits it; `CHANGES_REQUESTED` sends the findings back, while `APPROVE` counts towards
    `done_approvals` (default 2: after the first approval a worker does one more fresh-eyes verification pass).
    If agents stall with a complete plan and green checks but don't claim done, the supervisor makes the claim for
-   them.
+   them. Once approved, the run is `done`; by default (`after_done = "wait"`) the supervisor stays up and starts
+   working again as soon as you `say` something new. A run otherwise only ends when you stop it or when it reaches
+   `max_hours` / `max_iterations` if you set them.
 
 ### Resilience
 
@@ -161,9 +186,14 @@ session (plus their own commits), so `git log` and `git diff main` show exactly 
 | Agent hangs | Killed after `idle_timeout_minutes` without output, with its whole process group; retried |
 | Session runs too long | Stopped at `session_timeout_minutes`; work kept, next session continues |
 | Logged out / bad key / bad model | Retried every `auth_seconds` / `max_seconds`; status and `notify` say what to fix |
-| Work done before a failure | Committed as `cut off: <reason>` and journaled |
-| Supervisor itself crashes | `bananavibe run` restarts it (state is on disk) |
-| Server reboots | Run `bananavibe start` again (or use the systemd unit in [docs/server.md](docs/server.md)); it resumes from the state on disk, continuing an interrupted session |
+| Work done before a failure | Committed as `cut off: <reason>` and journaled; a session that had done real work is continued (same conversation for Claude Code) |
+| Supervisor crashes, is killed (`kill -9`, OOM killer) or hangs | A guardian process restarts it within seconds (hangs are detected by a heartbeat watchdog); the cut-off session's leftover processes are stopped and the session is continued |
+| Server reboots, or the guardian itself is killed | `bananavibe start` installed a systemd service (restart on failure, start at boot, `OOMPolicy=continue`) or cron entries (`@reboot` and every 10 minutes if down) |
+| Out of memory | Agents are marked as the OOM killer's preferred victims (`oom_score_adj`), so an agent (retried) dies, not the supervisor; low memory delays the next session instead of starting one that would be killed |
+| Disk filling up | Old logs are compressed and pruned to a budget; on low or full disk it cleans up and waits instead of failing |
+| Stopped or crashed in the middle of anything | Post-session work (checks, a done claim's review, a checkpoint), feedback and your messages are on disk and resumed |
+| Agent edits `GOAL.md` / `config.toml`, switches branch, or leaves huge files | Edits are reverted, the branch is switched back, files over `max_file_mb` are kept out of git; the agent is told why |
+| Agent runs `git clean -fdx` or deletes `.bananavibe/` | `git clean` leaves it alone; if deleted, it is restored (state from memory, plan, notes, journal and queued messages from a backup outside the workspace); if the supervisor died too, its automatic restart rebuilds the whole directory from that backup |
 
 ## Configuration
 
@@ -175,6 +205,12 @@ workers = ["claude", "codex"]   # order of preference; failover on limits
 reviewer = "codex"              # a different model catches more
 checkpoint_every = 5
 done_approvals = 2
+after_done = "wait"             # stay up after approval and continue on new instructions ("exit" to end)
+autostart = true                # `start` sets up starting at boot / when down (systemd or cron)
+
+[notify]                        # optional: a command and/or a webhook (ntfy, Slack, Discord, JSON)
+url = "https://ntfy.sh/my-secret-topic"
+update_every_hours = 6          # a short progress update every 6 hours
 
 [[checks]]                      # the objective definition of "working"
 name = "tests"
@@ -191,6 +227,14 @@ effort = "ultra"
 
 See [docs/configuration.md](docs/configuration.md) for everything, including custom agents and notifications.
 
+## Is BananaVibe an agent?
+
+No. It has no model of its own and makes no model API calls: it is a supervisor that runs the real agent CLIs
+(Claude Code, Codex, OpenCode, or any CLI via `type = "custom"`) headless, with their own logins and
+subscriptions, and keeps them going, checked and reviewed. Every session is an ordinary conversation of that
+agent: `bananavibe open <#>` reopens it in the agent's own UI, `bananavibe show <#> > chat.md` exports a readable
+transcript.
+
 ## Writing a good mission
 
 The supervisor keeps agents going; the mission decides where they go. Spell out the scope, a concrete
@@ -203,6 +247,11 @@ BananaVibe runs agents with **all permission prompts disabled**, by design: nobo
 on a machine or VM where that's acceptable (a dedicated VPS, a container, a throwaway VM), never on your laptop's
 main account, and give it only the credentials it needs. Agents are told not to push or deploy unless you set
 `allow_push = true`. See [docs/server.md](docs/server.md) for a hardened setup.
+
+The agents run as the same user as the supervisor, so its protections (reverting edits to `GOAL.md` and
+`config.toml`, keeping agents on the work branch, never killing processes it can't prove are its own, validating
+imported archives) guard against mistakes, not against a deliberately hostile agent: isolation comes from the
+machine you give it.
 
 ## Subscriptions and terms
 

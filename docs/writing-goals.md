@@ -19,8 +19,9 @@ to avoid, files not to touch. Unbounded "optimize everything" runs drift into re
 **Give context agents can't discover.** Deployment targets, expected load, who the users are, known bugs, links to
 specs (paste them; agents may not have network access to private docs).
 
-**Keep it stable.** Edit `GOAL.md` between runs if you must, but for course corrections during a run use
-`bananavibe say`, which is delivered once and recorded in the journal.
+**Keep it stable.** For course corrections during a run use `bananavibe say` (or `say --now`), which reaches the
+agents and is recorded. If the mission itself must change, use `bananavibe edit goal`: it applies from the next
+session without interrupting the current one.
 
 ## Template
 
